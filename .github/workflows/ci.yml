@@ -1,0 +1,66 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint-and-test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+    env:
+      # Force uv to use the matrix Python regardless of any pinned
+      # `.python-version` file in the repo.
+      UV_PYTHON: ${{ matrix.python-version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        env:
+          PYTHON_VERSION: ${{ matrix.python-version }}
+        run: uv python install "$PYTHON_VERSION"
+
+      - name: Sync dev deps (matrix Python)
+        env:
+          PYTHON_VERSION: ${{ matrix.python-version }}
+        run: uv sync --extra dev --python "$PYTHON_VERSION"
+
+      - name: Verify interpreter version
+        env:
+          PYTHON_VERSION: ${{ matrix.python-version }}
+        run: |
+          actual=$(uv run --python "$PYTHON_VERSION" python -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
+          expected="$PYTHON_VERSION"
+          if [ "$actual" != "$expected" ]; then
+            echo "::error::Expected Python $expected but got $actual"
+            exit 1
+          fi
+
+      - name: Lint
+        run: uv run ruff check src tests
+
+      - name: Format check
+        run: uv run ruff format --check src tests
+
+      - name: Type-check
+        run: uv run mypy src
+
+      - name: Unit tests
+        run: uv run pytest -m "not integration and not slow" --cov --cov-report=term
