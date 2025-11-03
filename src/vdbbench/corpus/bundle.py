@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import dataclass, field
 
+import numpy as np
 import pandas as pd
 
 # Canonical column orderings — checked by the validators so loaders can't drift.
@@ -22,7 +25,7 @@ def _ensure_columns(df: pd.DataFrame, expected: tuple[str, ...], name: str) -> p
     return df.loc[:, list(expected)].reset_index(drop=True)
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, eq=False)
 class CorpusBundle:
     """A passage corpus, the queries against it, and the relevance judgements."""
 
@@ -31,6 +34,10 @@ class CorpusBundle:
     queries: pd.DataFrame
     qrels: pd.DataFrame
     metadata: dict[str, object] = field(default_factory=dict)
+    # Filled in __post_init__ from `fingerprint()` after validation. Used by
+    # __eq__/__hash__ so identity stays stable across in-place mutations of
+    # the underlying frames or metadata.
+    _construction_fingerprint: str = field(default="", repr=False, compare=False)
 
     def __post_init__(self) -> None:
         for attr, cols, label in (
@@ -96,6 +103,22 @@ class CorpusBundle:
                 f"(first: {sorted(orphan_qids)[:3]})"
             )
 
+        # Cache fingerprint last (after validation passes) so identity is
+        # frozen even if callers mutate the dataframes in place later.
+        object.__setattr__(self, "_construction_fingerprint", self.fingerprint())
+
+    # ---------- value semantics ----------
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, CorpusBundle):
+            return NotImplemented
+        return self._construction_fingerprint == other._construction_fingerprint
+
+    def __hash__(self) -> int:
+        return hash(self._construction_fingerprint)
+
+    # ---------- shape helpers ----------
+
     @property
     def n_passages(self) -> int:
         return len(self.passages)
@@ -107,3 +130,65 @@ class CorpusBundle:
     @property
     def n_qrels(self) -> int:
         return len(self.qrels)
+
+    # ---------- determinism / fingerprinting ----------
+
+    def fingerprint(self) -> str:
+        """A stable hex digest of the bundle's content + provenance metadata.
+
+        Used to detect cache hits and to tag run outputs. Order-invariant
+        across the row dimension so different shuffles of the same data hash
+        to the same value. Includes `metadata` so post-save edits to the
+        manifest are caught at load time.
+        """
+        h = hashlib.blake2b(digest_size=16)
+        for df, cols in (
+            (self.passages, PASSAGE_COLS),
+            (self.queries, QUERY_COLS),
+            (self.qrels, QREL_COLS),
+        ):
+            ordered = df.sort_values(by=list(cols)).reset_index(drop=True)
+            for col in cols:
+                # Each value is length-prefixed so embedded delimiters in user
+                # content (rare but possible — e.g. `pid='b\x1f\x01c'`) cannot
+                # collide with our framing. Nulls get a sentinel length of -1
+                # to stay distinguishable from empty strings.
+                series = ordered[col].astype("string")
+                for value, is_null in zip(series, series.isna(), strict=True):
+                    if is_null:
+                        h.update(b"\xff\xff\xff\xff")  # u32 sentinel for null
+                        continue
+                    encoded = str(value).encode("utf-8")
+                    h.update(len(encoded).to_bytes(4, "big", signed=False))
+                    h.update(encoded)
+                h.update(b"||COL||")
+            h.update(b"||DF||")
+        h.update(self.name.encode("utf-8"))
+        h.update(b"\x1d")
+        # `metadata` is fingerprinted as canonical JSON so `manifest.json`
+        # mutations are caught at load time too.
+        h.update(json.dumps(_jsonable(self.metadata), sort_keys=True).encode("utf-8"))
+        return h.hexdigest()
+
+
+def _jsonable(obj: object) -> object:  # noqa: PLR0911
+    """Coerce metadata into something json.dumps will accept.
+
+    Sets are converted to *sorted* lists so that fingerprints stay
+    deterministic across processes (Python set iteration order is
+    hash-seed dependent). NumPy scalars are unwrapped because they would
+    otherwise raise `TypeError: Object of type ... is not JSON serializable`.
+    """
+    if isinstance(obj, dict):
+        return {str(k): _jsonable(v) for k, v in obj.items()}
+    if isinstance(obj, set | frozenset):
+        return sorted((_jsonable(v) for v in obj), key=repr)
+    if isinstance(obj, list | tuple):
+        return [_jsonable(v) for v in obj]
+    if isinstance(obj, np.bool_):
+        return bool(obj)
+    if isinstance(obj, np.integer | np.floating):
+        return obj.item()
+    if isinstance(obj, np.ndarray):
+        return obj.tolist()
+    return obj
