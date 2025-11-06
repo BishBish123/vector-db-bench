@@ -5,6 +5,8 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Self
 
 import numpy as np
 import pandas as pd
@@ -27,7 +29,13 @@ def _ensure_columns(df: pd.DataFrame, expected: tuple[str, ...], name: str) -> p
 
 @dataclass(frozen=True, eq=False)
 class CorpusBundle:
-    """A passage corpus, the queries against it, and the relevance judgements."""
+    """A passage corpus, the queries against it, and the relevance judgements.
+
+    `pid` and `qid` are stored as strings so loaders are free to use any id
+    scheme (BeIR uses string ids, MS-MARCO uses integers — we normalize).
+    `relevance` is non-negative; 0 means "judged but not relevant", >0 means
+    relevant (BEIR uses graded relevance for some datasets).
+    """
 
     name: str
     passages: pd.DataFrame
@@ -40,6 +48,7 @@ class CorpusBundle:
     _construction_fingerprint: str = field(default="", repr=False, compare=False)
 
     def __post_init__(self) -> None:
+        # Frozen dataclass means we have to use object.__setattr__ to normalize.
         for attr, cols, label in (
             ("passages", PASSAGE_COLS, "passages"),
             ("queries", QUERY_COLS, "queries"),
@@ -108,6 +117,15 @@ class CorpusBundle:
         object.__setattr__(self, "_construction_fingerprint", self.fingerprint())
 
     # ---------- value semantics ----------
+    #
+    # Auto-generated dataclass __eq__/__hash__ are disabled because pandas
+    # DataFrame equality returns a frame (not a bool) and DataFrames are
+    # unhashable. Both __eq__ and __hash__ go through a fingerprint that is
+    # captured at construction time and stored on the instance, so callers
+    # can safely use bundles as dict/set keys: in-place mutation of the
+    # underlying DataFrames or metadata after construction will not silently
+    # shift the hash bucket and leak entries (the bundle is logically
+    # immutable for identity purposes).
 
     def __eq__(self, other: object) -> bool:
         if not isinstance(other, CorpusBundle):
@@ -170,6 +188,118 @@ class CorpusBundle:
         h.update(json.dumps(_jsonable(self.metadata), sort_keys=True).encode("utf-8"))
         return h.hexdigest()
 
+    # ---------- sampling ----------
+
+    def sample_passages(
+        self,
+        n: int,
+        seed: int = 42,
+        keep_only_judged_queries: bool = True,
+    ) -> Self:
+        """Return a deterministic sub-bundle restricted to `n` passages.
+
+        Qrels referring to passages not in the sample are dropped. By default,
+        queries that lose all of their relevant passages are also dropped so
+        downstream recall computations are well-defined. The pruning behavior
+        applies regardless of whether the sample is smaller than the corpus.
+        """
+        if n <= 0:
+            raise ValueError("n must be positive")
+
+        rng = np.random.default_rng(seed)
+
+        if n >= self.n_passages:
+            new_passages = self.passages.sort_values("pid").reset_index(drop=True)
+            new_qrels = self.qrels.sort_values(["qid", "pid"]).reset_index(drop=True)
+        else:
+            pids_sorted = np.sort(self.passages["pid"].to_numpy().astype(str))
+            chosen = rng.choice(pids_sorted, size=n, replace=False)
+            chosen.sort()
+            keep = pd.Index(chosen)
+            new_passages = (
+                self.passages[self.passages["pid"].isin(keep)]
+                .sort_values("pid")
+                .reset_index(drop=True)
+            )
+            new_qrels = (
+                self.qrels[self.qrels["pid"].isin(keep)]
+                .sort_values(["qid", "pid"])
+                .reset_index(drop=True)
+            )
+
+        if keep_only_judged_queries:
+            judged = new_qrels[new_qrels["relevance"] > 0]["qid"].unique()
+            new_queries = (
+                self.queries[self.queries["qid"].isin(judged)]
+                .sort_values("qid")
+                .reset_index(drop=True)
+            )
+            new_qrels = new_qrels[new_qrels["qid"].isin(new_queries["qid"])].reset_index(drop=True)
+        else:
+            new_queries = self.queries.copy().reset_index(drop=True)
+
+        # Clamp `n` for naming/metadata so two oversize requests on the same
+        # corpus (n=999, n=10000 against a 4-row corpus) produce identical
+        # bundles and identical fingerprints. Seed is also stripped from the
+        # identity when the sample is a no-op (n covers the whole corpus),
+        # since two oversized calls with different seeds yield the same data.
+        effective_n = min(int(n), self.n_passages)
+        is_full_corpus = effective_n == self.n_passages
+        effective_seed = 0 if is_full_corpus else int(seed)
+        new_meta = {
+            **self.metadata,
+            "sampled_from": self.fingerprint(),
+            "sample_n": effective_n,
+            "sample_seed": effective_seed,
+        }
+        return type(self)(
+            name=f"{self.name}@n={effective_n}.seed={effective_seed}",
+            passages=new_passages,
+            queries=new_queries,
+            qrels=new_qrels,
+            metadata=new_meta,
+        )
+
+    # ---------- IO ----------
+
+    def save(self, root: str | Path) -> Path:
+        """Persist as a directory of parquet files + a manifest."""
+        root_path = Path(root)
+        root_path.mkdir(parents=True, exist_ok=True)
+        self.passages.to_parquet(root_path / "passages.parquet", index=False)
+        self.queries.to_parquet(root_path / "queries.parquet", index=False)
+        self.qrels.to_parquet(root_path / "qrels.parquet", index=False)
+        manifest = {
+            "name": self.name,
+            "n_passages": self.n_passages,
+            "n_queries": self.n_queries,
+            "n_qrels": self.n_qrels,
+            "fingerprint": self.fingerprint(),
+            "metadata": _jsonable(self.metadata),
+        }
+        (root_path / "manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True))
+        return root_path
+
+    @classmethod
+    def load(cls, root: str | Path) -> Self:
+        root_path = Path(root)
+        manifest_path = root_path / "manifest.json"
+        if not manifest_path.exists():
+            raise FileNotFoundError(f"no manifest.json under {root_path}")
+        manifest = json.loads(manifest_path.read_text())
+        bundle = cls(
+            name=str(manifest["name"]),
+            passages=pd.read_parquet(root_path / "passages.parquet"),
+            queries=pd.read_parquet(root_path / "queries.parquet"),
+            qrels=pd.read_parquet(root_path / "qrels.parquet"),
+            metadata=manifest.get("metadata", {}),
+        )
+        if (fp := manifest.get("fingerprint")) and fp != bundle.fingerprint():
+            raise ValueError(
+                "loaded bundle fingerprint does not match manifest — corpus has been mutated"
+            )
+        return bundle
+
 
 def _jsonable(obj: object) -> object:  # noqa: PLR0911
     """Coerce metadata into something json.dumps will accept.
@@ -189,6 +319,6 @@ def _jsonable(obj: object) -> object:  # noqa: PLR0911
         return bool(obj)
     if isinstance(obj, np.integer | np.floating):
         return obj.item()
-    if isinstance(obj, np.ndarray):
-        return obj.tolist()
+    if isinstance(obj, Path):
+        return str(obj)
     return obj
