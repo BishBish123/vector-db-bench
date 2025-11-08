@@ -58,12 +58,19 @@ services:
     healthcheck:
       # qdrant/qdrant:v1.17.0 ships without curl or wget, so the previous
       # wget-based healthcheck always reported the container unhealthy
-      # and `up --wait` timed out. bash *is* present, so use the bash
-      # builtin /dev/tcp probe to verify the HTTP port is accepting
-      # connections — a strict-enough readiness signal for the bench
-      # harness, which retries the actual API call with its own
-      # backoff after `make up` returns.
-      test: ["CMD-SHELL", "bash -c 'cat < /dev/tcp/localhost/6333' >/dev/null 2>&1 || exit 1"]
+      # and `up --wait` timed out. bash *is* present, so use a pure
+      # connect/close probe via bash's /dev/tcp builtin to verify the
+      # HTTP port is accepting connections. The earlier `cat
+      # </dev/tcp/...` form blocked the probe waiting for response
+      # bytes (or EOF), which routinely burned the 5s timeout and kept
+      # Qdrant marked unhealthy long after the socket was actually
+      # accepting connections; the redirect form below opens fd 3 and
+      # immediately closes it, so the probe returns the moment TCP
+      # connect succeeds. This is a strict-enough readiness signal for
+      # the bench harness, which retries the actual API call with its
+      # own backoff after `make up` returns.
+      test:
+        ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/localhost/6333 && exec 3<&- 3>&-' || exit 1"]
       interval: 5s
       timeout: 5s
       retries: 10
