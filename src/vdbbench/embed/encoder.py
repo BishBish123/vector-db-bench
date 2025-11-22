@@ -319,9 +319,6 @@ def _read_vectors(path: Path, expected_ids: pd.Series[str], expected_dim: int) -
             f"vector file {path.name} ids do not match the bundle "
             f"(possibly mutated; expected {len(expected_ids)} ids, got {len(ids)})"
         )
-    if not ids:
-        # `np.array([])` would be 1-D, breaking the EncodedBundle invariant.
-        return np.zeros((0, expected_dim), dtype=np.float32)
 
     # Read the FixedSizeListArray's underlying float32 buffer straight into
     # NumPy, instead of going through `to_pylist()` -> Python list of lists
@@ -329,6 +326,19 @@ def _read_vectors(path: Path, expected_ids: pd.Series[str], expected_dim: int) -
     # objects (~40 bytes each) before NumPy can rebuild the contiguous
     # buffer; on a 1M x 384 corpus that's ~15 GB of transient Python heap,
     # enough to OOM most laptops.
+    #
+    # NB: the empty-row fast path lives *after* schema validation (below).
+    # An earlier version short-circuited on `not ids` and returned a clean
+    # `(0, expected_dim)` array before checking the parquet column at all,
+    # which silently swallowed legal-but-corrupt zero-row files: missing
+    # `vector` column, wrong `FixedSizeList` width, or wrong child dtype
+    # all loaded "successfully". Validate first, fast-path second.
+    if "vector" not in table.column_names:
+        raise ValueError(
+            f"vector file {path.name} is missing the required 'vector' column "
+            f"(found columns: {list(table.column_names)}) — likely a different "
+            f"writer or a truncated file"
+        )
     column = table.column("vector")
     # The list-element-size is part of the parquet schema; trust it as the
     # *actual* dim so we can detect a mismatch with `expected_dim` rather
@@ -341,6 +351,21 @@ def _read_vectors(path: Path, expected_ids: pd.Series[str], expected_dim: int) -
             f"declares dim {expected_dim} — likely a different encoder's "
             f"output got swapped in"
         )
+    # Validate the child dtype before short-circuiting on empty so a
+    # zero-row parquet whose `vector` column was written with float64 (or
+    # any other non-float32 child) still trips the corruption guard. Empty
+    # FixedSizeListArrays still expose `value_type` from the parquet
+    # schema, so this works without scanning any rows.
+    value_type = getattr(list_type, "value_type", None)
+    if value_type is not None and value_type != pa.float32():
+        raise ValueError(
+            f"vector file {path.name} has child dtype {value_type}, expected float32"
+        )
+    if not ids:
+        # `np.array([])` would be 1-D, breaking the EncodedBundle invariant.
+        # Schema-validated above, so this is the legal zero-query / zero-passage
+        # case rather than a silent corruption pass-through.
+        return np.zeros((0, expected_dim), dtype=np.float32)
     chunks = column.chunks if hasattr(column, "chunks") else [column]
     parts: list[np.ndarray] = []
     for chunk in chunks:

@@ -499,6 +499,90 @@ class TestEncodedBundleEdgeCases:
         with pytest.raises(ValueError, match="dim 16 but the manifest declares dim 8"):
             load_encoded_bundle(out)
 
+    def test_load_rejects_empty_queries_with_missing_vector_column(
+        self, tmp_path: Path
+    ) -> None:
+        """A zero-row queries parquet missing the `vector` column must fail.
+
+        Earlier the loader short-circuited on `not ids` and returned a
+        clean `(0, expected_dim)` array before validating the parquet
+        schema at all, so a corrupt zero-row file silently bypassed the
+        dim-mismatch / corruption guard. Schema check has to happen
+        before the empty-row fast path.
+        """
+        import pyarrow as pa  # noqa: PLC0415
+        import pyarrow.parquet as pq  # noqa: PLC0415
+
+        bundle = CorpusBundle(
+            name="empty-q",
+            passages=pd.DataFrame({"pid": ["p0"], "text": ["a"]}),
+            queries=pd.DataFrame({"qid": [], "text": []}, dtype=object),
+            qrels=pd.DataFrame(
+                {
+                    "qid": pd.Series([], dtype=str),
+                    "pid": pd.Series([], dtype=str),
+                    "relevance": pd.Series([], dtype=float),
+                }
+            ),
+        )
+        encoded = EncodedBundle(
+            bundle=bundle,
+            passage_vectors=np.zeros((1, 8), dtype=np.float32),
+            query_vectors=np.zeros((0, 8), dtype=np.float32),
+            encoder_name="fake",
+        )
+        out = encoded.save(tmp_path / "missing-col")
+
+        # Overwrite queries.parquet with an id-only schema (no `vector`
+        # column at all). On the empty-rows path the old loader returned
+        # zeros without ever inspecting the schema.
+        bad = pa.table({"id": pa.array([], type=pa.string())})
+        pq.write_table(bad, out / "queries.parquet")  # type: ignore[no-untyped-call]
+        with pytest.raises(ValueError, match="missing the required 'vector' column"):
+            load_encoded_bundle(out)
+
+    def test_load_rejects_empty_queries_with_wrong_fixed_size_list_width(
+        self, tmp_path: Path
+    ) -> None:
+        """Zero-row parquet whose `vector` column declares a different
+        FixedSizeList width than the manifest must still be rejected.
+
+        Empty FixedSizeListArrays still expose `list_size` from the
+        schema, so the dim-mismatch guard is enforceable without scanning
+        any rows. The earlier fast path skipped this check entirely.
+        """
+        import pyarrow as pa  # noqa: PLC0415
+        import pyarrow.parquet as pq  # noqa: PLC0415
+
+        bundle = CorpusBundle(
+            name="empty-q-wrong-width",
+            passages=pd.DataFrame({"pid": ["p0"], "text": ["a"]}),
+            queries=pd.DataFrame({"qid": [], "text": []}, dtype=object),
+            qrels=pd.DataFrame(
+                {
+                    "qid": pd.Series([], dtype=str),
+                    "pid": pd.Series([], dtype=str),
+                    "relevance": pd.Series([], dtype=float),
+                }
+            ),
+        )
+        encoded = EncodedBundle(
+            bundle=bundle,
+            passage_vectors=np.zeros((1, 8), dtype=np.float32),
+            query_vectors=np.zeros((0, 8), dtype=np.float32),
+            encoder_name="fake",
+        )
+        out = encoded.save(tmp_path / "wrong-width")
+
+        # Overwrite queries.parquet with the right column names but a
+        # FixedSizeList<float32, 16> instead of <float32, 8>. Zero rows.
+        flat = pa.array([], type=pa.float32())
+        wrong = pa.FixedSizeListArray.from_arrays(flat, 16)
+        bad = pa.table({"id": pa.array([], type=pa.string()), "vector": wrong})
+        pq.write_table(bad, out / "queries.parquet")  # type: ignore[no-untyped-call]
+        with pytest.raises(ValueError, match="dim 16 but the manifest declares dim 8"):
+            load_encoded_bundle(out)
+
     def test_manifest_records_encoded_at_fingerprint(self, tmp_path: Path) -> None:
         """The on-disk manifest must record the bundle fingerprint at encode time."""
         import json  # noqa: PLC0415
