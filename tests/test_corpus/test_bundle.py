@@ -402,3 +402,125 @@ class TestRoundtrip:
     def test_load_missing_manifest(self, tmp_path: Path) -> None:
         with pytest.raises(FileNotFoundError):
             CorpusBundle.load(tmp_path)
+
+
+class TestSliceFraction:
+    def test_half_fraction_keeps_about_half(self) -> None:
+        passages = pd.DataFrame({"pid": [f"p{i}" for i in range(20)], "text": ["x"] * 20})
+        queries = pd.DataFrame({"qid": ["q0"], "text": ["x"]})
+        qrels = pd.DataFrame(
+            {"qid": ["q0"] * 20, "pid": [f"p{i}" for i in range(20)], "relevance": [1] * 20}
+        )
+        bundle = CorpusBundle(name="b", passages=passages, queries=queries, qrels=qrels)
+
+        sliced = bundle.slice_fraction(0.5, seed=0)
+        assert sliced.n_passages == 10
+        assert "slice_dropped_qrels" in sliced.metadata
+        assert int(sliced.metadata["slice_dropped_qrels"]) == 10  # type: ignore[arg-type]
+
+    def test_records_fraction_in_metadata(self) -> None:
+        bundle = _toy_bundle()
+        sliced = bundle.slice_fraction(0.75, seed=1)
+        assert sliced.metadata["slice_fraction"] == pytest.approx(0.75)
+
+    def test_full_fraction_keeps_everything(self) -> None:
+        bundle = _toy_bundle()
+        sliced = bundle.slice_fraction(1.0)
+        assert sliced.n_passages == bundle.n_passages
+        assert sliced.metadata["slice_dropped_qrels"] == 0
+
+    def test_invalid_fraction_rejected(self) -> None:
+        bundle = _toy_bundle()
+        with pytest.raises(ValueError, match="fraction"):
+            bundle.slice_fraction(0.0)
+        with pytest.raises(ValueError, match="fraction"):
+            bundle.slice_fraction(1.5)
+        with pytest.raises(ValueError, match="fraction"):
+            bundle.slice_fraction(-0.1)
+
+
+class TestMerge:
+    def test_disjoint_merge(self) -> None:
+        a = CorpusBundle(
+            name="a",
+            passages=pd.DataFrame({"pid": ["p0", "p1"], "text": ["alpha", "bravo"]}),
+            queries=pd.DataFrame({"qid": ["q0"], "text": ["x"]}),
+            qrels=pd.DataFrame({"qid": ["q0"], "pid": ["p0"], "relevance": [1]}),
+        )
+        b = CorpusBundle(
+            name="b",
+            passages=pd.DataFrame({"pid": ["p2", "p3"], "text": ["charlie", "delta"]}),
+            queries=pd.DataFrame({"qid": ["q1"], "text": ["y"]}),
+            qrels=pd.DataFrame({"qid": ["q1"], "pid": ["p2"], "relevance": [1]}),
+        )
+        merged = a.merge(b)
+        assert merged.n_passages == 4
+        assert merged.n_queries == 2
+        assert merged.n_qrels == 2
+        assert "merged_from" in merged.metadata
+
+    def test_overlapping_pids_dedupe_keep_first(self) -> None:
+        a = CorpusBundle(
+            name="a",
+            passages=pd.DataFrame({"pid": ["p0", "p1"], "text": ["alpha", "bravo"]}),
+            queries=pd.DataFrame({"qid": ["q0"], "text": ["x"]}),
+            qrels=pd.DataFrame({"qid": ["q0"], "pid": ["p0"], "relevance": [1]}),
+        )
+        b = CorpusBundle(
+            name="b",
+            passages=pd.DataFrame({"pid": ["p1", "p2"], "text": ["DIFFERENT", "charlie"]}),
+            queries=pd.DataFrame({"qid": ["q1"], "text": ["y"]}),
+            qrels=pd.DataFrame({"qid": ["q1"], "pid": ["p2"], "relevance": [1]}),
+        )
+        merged = a.merge(b)
+        assert merged.n_passages == 3
+        # `p1` text comes from `a` because dedup keeps first.
+        p1_text = merged.passages.loc[merged.passages["pid"] == "p1", "text"].iloc[0]
+        assert p1_text == "bravo"
+
+    def test_conflicting_grades_rejected(self) -> None:
+        a = CorpusBundle(
+            name="a",
+            passages=pd.DataFrame({"pid": ["p0"], "text": ["x"]}),
+            queries=pd.DataFrame({"qid": ["q0"], "text": ["y"]}),
+            qrels=pd.DataFrame({"qid": ["q0"], "pid": ["p0"], "relevance": [1]}),
+        )
+        b = CorpusBundle(
+            name="b",
+            passages=pd.DataFrame({"pid": ["p0"], "text": ["x"]}),
+            queries=pd.DataFrame({"qid": ["q0"], "text": ["y"]}),
+            qrels=pd.DataFrame({"qid": ["q0"], "pid": ["p0"], "relevance": [3]}),
+        )
+        with pytest.raises(ValueError, match="conflicting relevance"):
+            a.merge(b)
+
+    def test_merge_with_custom_name(self) -> None:
+        a = _toy_bundle()
+        b = CorpusBundle(
+            name="other",
+            passages=pd.DataFrame({"pid": ["p9"], "text": ["z"]}),
+            queries=pd.DataFrame({"qid": ["q9"], "text": ["w"]}),
+            qrels=pd.DataFrame({"qid": ["q9"], "pid": ["p9"], "relevance": [1]}),
+        )
+        merged = a.merge(b, name="combined")
+        assert merged.name == "combined"
+
+    def test_rejects_non_bundle(self) -> None:
+        a = _toy_bundle()
+        with pytest.raises(TypeError, match="CorpusBundle"):
+            a.merge("not a bundle")  # type: ignore[arg-type]
+
+    def test_lineage_recorded(self) -> None:
+        a = _toy_bundle()
+        b = CorpusBundle(
+            name="b",
+            passages=pd.DataFrame({"pid": ["pX"], "text": ["z"]}),
+            queries=pd.DataFrame({"qid": ["qX"], "text": ["w"]}),
+            qrels=pd.DataFrame({"qid": ["qX"], "pid": ["pX"], "relevance": [1]}),
+        )
+        merged = a.merge(b)
+        lineage = merged.metadata["merged_from"]
+        assert isinstance(lineage, list)
+        assert len(lineage) == 2
+        assert a.fingerprint() in lineage
+        assert b.fingerprint() in lineage

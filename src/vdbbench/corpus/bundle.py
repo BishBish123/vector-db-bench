@@ -260,6 +260,94 @@ class CorpusBundle:
             metadata=new_meta,
         )
 
+    # ---------- transformations ----------
+
+    def slice_fraction(
+        self,
+        fraction: float,
+        seed: int = 42,
+        keep_only_judged_queries: bool = True,
+    ) -> Self:
+        """Return a sub-bundle with `round(fraction * n_passages)` passages.
+
+        Convenience over `sample_passages(n=...)` for fraction-of-corpus
+        slices ("give me 10 % of the data"). `fraction` is clamped to
+        `(0, 1]`; values outside that range raise. Qrels referencing
+        passages dropped by the slice are removed and the dropped count
+        is recorded in the resulting bundle's metadata under
+        `slice_dropped_qrels` so downstream code can surface it.
+        """
+        if not 0.0 < fraction <= 1.0:
+            raise ValueError(f"fraction must be in (0, 1], got {fraction!r}")
+        n = max(1, round(fraction * self.n_passages))
+        sliced = self.sample_passages(
+            n=n, seed=seed, keep_only_judged_queries=keep_only_judged_queries
+        )
+        dropped = self.n_qrels - sliced.n_qrels
+        new_meta = {
+            **sliced.metadata,
+            "slice_fraction": float(fraction),
+            "slice_dropped_qrels": int(dropped),
+        }
+        return type(self)(
+            name=sliced.name,
+            passages=sliced.passages,
+            queries=sliced.queries,
+            qrels=sliced.qrels,
+            metadata=new_meta,
+        )
+
+    def merge(self, other: Self, name: str | None = None) -> Self:
+        """Combine `self` and `other` into a single bundle.
+
+        Passage and query ids are unioned with first-wins de-duplication
+        (`self` precedes `other`). Qrels are unioned and de-duplicated by
+        `(qid, pid)` — if both bundles judge the same pair with different
+        relevance grades, that's a conflict and we raise rather than pick
+        one silently. The result's metadata gets a `merged_from` key with
+        both source fingerprints so the lineage is recoverable.
+        """
+        if not isinstance(other, CorpusBundle):
+            raise TypeError(f"merge expects a CorpusBundle, got {type(other)!r}")
+
+        passages = (
+            pd.concat([self.passages, other.passages], ignore_index=True)
+            .drop_duplicates(subset=["pid"], keep="first")
+            .reset_index(drop=True)
+        )
+        queries = (
+            pd.concat([self.queries, other.queries], ignore_index=True)
+            .drop_duplicates(subset=["qid"], keep="first")
+            .reset_index(drop=True)
+        )
+
+        qrels_combined = pd.concat([self.qrels, other.qrels], ignore_index=True)
+        # Detect conflicting grades for the same (qid, pid) pair before
+        # dedup — we'd silently pick whichever row appeared first otherwise.
+        conflicts = qrels_combined.groupby(["qid", "pid"])["relevance"].nunique().reset_index()
+        bad = conflicts[conflicts["relevance"] > 1]
+        if not bad.empty:
+            sample = bad.head(3).to_dict(orient="records")
+            raise ValueError(
+                f"merge: {len(bad)} (qid, pid) pairs have conflicting relevance "
+                f"grades across the two bundles (first: {sample})"
+            )
+        qrels = qrels_combined.drop_duplicates(subset=["qid", "pid"], keep="first").reset_index(
+            drop=True
+        )
+
+        merged_name = name if name is not None else f"{self.name}+{other.name}"
+        return type(self)(
+            name=merged_name,
+            passages=passages,
+            queries=queries,
+            qrels=qrels,
+            metadata={
+                "merged_from": [self.fingerprint(), other.fingerprint()],
+                "merged_names": [self.name, other.name],
+            },
+        )
+
     # ---------- IO ----------
 
     def save(self, root: str | Path) -> Path:
