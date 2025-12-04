@@ -12,7 +12,13 @@ EMBED_MODEL ?= BAAI/bge-small-en-v1.5
 
 # Container ports — overridable so collisions with an existing local
 # Postgres / Qdrant don't force the user to edit docker-compose.yml.
-# `make up PGVECTOR_PORT=5444 QDRANT_PORT=6343` is the documented escape hatch.
+# `make up PGVECTOR_PORT=5444 QDRANT_PORT=6343` is the documented escape
+# hatch. QDRANT_PORT and QDRANT_GRPC_PORT are independent overrides
+# (the gRPC port does NOT shift automatically when you change the HTTP
+# port); set `QDRANT_GRPC_PORT=6344` explicitly if 6334 is also taken.
+# The gRPC port is currently exposed for operator-side conflict
+# resolution and reserved for future gRPC support — the bench harness
+# itself only talks HTTP today.
 PGVECTOR_PORT ?= 5433
 QDRANT_PORT ?= 6333
 QDRANT_GRPC_PORT ?= 6334

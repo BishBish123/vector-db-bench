@@ -48,9 +48,13 @@ services:
     image: qdrant/qdrant:v1.17.0
     container_name: vdbbench-qdrant
     ports:
-      # Host port is overridable via `QDRANT_PORT` (defaults to 6333). The
-      # gRPC port (6334) shifts in lockstep so a `QDRANT_PORT=6343` run
-      # publishes 6343/6344 cleanly and the bench DSN stays consistent.
+      # Host port is overridable via `QDRANT_PORT` (default 6333). The
+      # gRPC port is independently overridable via `QDRANT_GRPC_PORT`
+      # (default 6334) — the two are not linked, so a `QDRANT_PORT=6343`
+      # run that also wants to free 6334 needs `QDRANT_GRPC_PORT=6344`
+      # set explicitly. `QDRANT_GRPC_PORT` is currently exposed for
+      # operator-side conflict resolution and for future gRPC support;
+      # the bench harness itself only talks HTTP today.
       - "${QDRANT_PORT:-6333}:6333"
       - "${QDRANT_GRPC_PORT:-6334}:6334"
     volumes:
