@@ -337,3 +337,27 @@ class TestEncodedBundleEdgeCases:
         _write_vectors(encoded2.passage_vectors, bundle.passages["pid"], out / "passages.parquet")
         with pytest.raises(ValueError, match="dim 16 but the manifest declares dim 8"):
             load_encoded_bundle(out)
+
+    def test_manifest_records_encoded_at_fingerprint(self, tmp_path: Path) -> None:
+        """The on-disk manifest must record the bundle fingerprint at encode time."""
+        import json  # noqa: PLC0415
+
+        bundle = _toy_bundle()
+        encoded = encode_corpus(bundle, FakeEncoder(dim=8))
+        out = encoded.save(tmp_path / "ok")
+        manifest = json.loads((out / "manifest.json").read_text())
+        assert "encoded_at_fingerprint" in manifest
+        assert manifest["encoded_at_fingerprint"] == bundle.fingerprint()
+        # Sanity: the dedicated drift-detection field equals the corpus's
+        # bundle fingerprint when no mutation occurred.
+        assert manifest["encoded_at_fingerprint"] == manifest["bundle_fingerprint"]
+
+    def test_manifest_records_encoder_dim_and_name(self, tmp_path: Path) -> None:
+        import json  # noqa: PLC0415
+
+        bundle = _toy_bundle()
+        encoded = encode_corpus(bundle, FakeEncoder(dim=12))
+        out = encoded.save(tmp_path / "names")
+        manifest = json.loads((out / "manifest.json").read_text())
+        assert manifest["dim"] == 12
+        assert manifest["encoder_name"] == "fake-test-encoder"

@@ -201,6 +201,12 @@ class EncodedBundle:
             # `corpus/` with a different bundle that happens to reuse the
             # same ids does not silently reattach stale vectors.
             "bundle_fingerprint": self.bundle.fingerprint(),
+            # Snapshot of the bundle fingerprint *at encoding time*. This is
+            # always equal to `bundle_fingerprint` at save() because we
+            # refused above to save with a stale bundle, but recording it
+            # explicitly makes the drift-detection invariant readable from
+            # the manifest alone.
+            "encoded_at_fingerprint": self._encoded_at_fingerprint,
             "metadata": _jsonable(self.metadata),
         }
         (root_path / "manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True))
