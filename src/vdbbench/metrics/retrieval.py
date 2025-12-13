@@ -8,6 +8,7 @@ results, then runs `aggregate(...)` to produce the per-DB summary stats
 
 from __future__ import annotations
 
+import math
 from collections.abc import Iterable
 from dataclasses import dataclass
 
@@ -94,6 +95,34 @@ def recall_at_k(
     top_k = set(retrieved[:k])
     hits = sum(1 for pid in positives if pid in top_k)
     return hits / len(positives)
+
+
+def ndcg_at_k(retrieved: tuple[str, ...] | list[str], relevant: dict[str, float], k: int) -> float:
+    """Normalized DCG @ k with the standard `(2^rel - 1) / log2(rank + 1)` gain.
+
+    Implementation note: sums over the top-k retrieved using their graded
+    relevance, then divides by the ideal DCG (top-k by descending grade
+    over `relevant`). Returns 0.0 when the ideal DCG is 0.
+    """
+    if k <= 0:
+        raise ValueError("k must be positive")
+    if not relevant:
+        return 0.0
+
+    dcg = 0.0
+    for rank, pid in enumerate(retrieved[:k], start=1):
+        rel = relevant.get(pid, 0.0)
+        if rel > 0:
+            dcg += (2.0**rel - 1.0) / math.log2(rank + 1)
+
+    # Ideal: top-k positives by grade descending.
+    ideal_grades = sorted(relevant.values(), reverse=True)[:k]
+    idcg = sum(
+        (2.0**rel - 1.0) / math.log2(rank + 1) for rank, rel in enumerate(ideal_grades, start=1)
+    )
+    if idcg == 0:
+        return 0.0
+    return float(dcg / idcg)
 
 
 # ---------------------------------------------------------------------------
