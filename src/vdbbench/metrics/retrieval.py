@@ -97,6 +97,36 @@ def recall_at_k(
     return hits / len(positives)
 
 
+def hit_rate(retrieved: tuple[str, ...] | list[str], relevant: dict[str, float], k: int) -> float:
+    """1.0 if any *positive* pid appears in the top `k`, else 0.0."""
+    if k <= 0:
+        raise ValueError("k must be positive")
+    positives = _positives(relevant)
+    if not positives:
+        return 0.0
+    return float(any(pid in positives for pid in retrieved[:k]))
+
+
+def mrr(
+    retrieved: tuple[str, ...] | list[str], relevant: dict[str, float], k: int | None = None
+) -> float:
+    """Reciprocal rank of the first *positive* pid; 0.0 if none in top `k`.
+
+    `k=None` means "look through the entire response". Most retrieval
+    benchmarks report MRR@10 — pass `k=10` for that.
+    """
+    if k is not None and k <= 0:
+        raise ValueError("k must be positive")
+    positives = _positives(relevant)
+    if not positives:
+        return 0.0
+    cap = len(retrieved) if k is None else min(k, len(retrieved))
+    for rank, pid in enumerate(retrieved[:cap], start=1):
+        if pid in positives:
+            return 1.0 / rank
+    return 0.0
+
+
 def ndcg_at_k(retrieved: tuple[str, ...] | list[str], relevant: dict[str, float], k: int) -> float:
     """Normalized DCG @ k with the standard `(2^rel - 1) / log2(rank + 1)` gain.
 
