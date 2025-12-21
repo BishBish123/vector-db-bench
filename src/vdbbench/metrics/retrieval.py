@@ -1,4 +1,4 @@
-"""Retrieval quality metrics: recall@k.
+"""Retrieval quality metrics: recall@k, NDCG@k, MRR, hit-rate@k.
 
 These are pure functions over `RetrievalResult` (one per query) and a
 `QrelIndex` (qid -> pid -> relevance grade). The bench harness collects

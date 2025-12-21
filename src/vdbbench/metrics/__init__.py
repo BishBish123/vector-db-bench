@@ -1,6 +1,7 @@
-"""Retrieval-metric helpers."""
+"""Retrieval metrics: recall@k, NDCG, MRR, hit-rate + aggregation helpers."""
 
 from vdbbench.metrics.retrieval import (
+    QrelIndex,
     RetrievalResult,
     aggregate,
     build_qrel_index,
@@ -11,6 +12,7 @@ from vdbbench.metrics.retrieval import (
 )
 
 __all__ = [
+    "QrelIndex",
     "RetrievalResult",
     "aggregate",
     "build_qrel_index",
