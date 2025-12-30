@@ -5,9 +5,11 @@ from vdbbench.adapters.base import (
     IngestStats,
     VectorStoreAdapter,
 )
+from vdbbench.adapters.pgvector import PgVectorAdapter
 
 __all__ = [
     "IndexStats",
     "IngestStats",
+    "PgVectorAdapter",
     "VectorStoreAdapter",
 ]
