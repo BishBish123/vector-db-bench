@@ -11,7 +11,12 @@ binding. Knobs land in the `params` dict — supported keys:
         "ef_search": int,        # HNSW query-time param (default: 40)
         "lists": int,            # IVFFLAT param (default: sqrt(N))
         "probes": int,           # IVFFLAT query-time param (default: 10)
+        "analyze_after_index": bool,  # default: True
     }
+
+`analyze_after_index=True` runs `ANALYZE` after the index build so the
+planner has accurate statistics. Disable it for "first-query cold" timings
+where you specifically want to measure plan-cache misses.
 """
 
 from __future__ import annotations
@@ -148,7 +153,8 @@ class PgVectorAdapter:
                     f'CREATE INDEX ON "{self._table}" USING ivfflat '
                     f"(vec {self._opclass}) WITH (lists = {lists})"
                 )
-            cur.execute(f'ANALYZE "{self._table}"')
+            if bool(self._params.get("analyze_after_index", True)):
+                cur.execute(f'ANALYZE "{self._table}"')
             # Pass the *quoted* identifier into pg_total_relation_size so
             # mixed-case table names round-trip (regclass folds bare names
             # to lowercase, which would error on `BenchVectors`-style ids).
