@@ -6,10 +6,12 @@ from vdbbench.adapters.base import (
     VectorStoreAdapter,
 )
 from vdbbench.adapters.pgvector import PgVectorAdapter
+from vdbbench.adapters.qdrant import QdrantAdapter
 
 __all__ = [
     "IndexStats",
     "IngestStats",
     "PgVectorAdapter",
+    "QdrantAdapter",
     "VectorStoreAdapter",
 ]
