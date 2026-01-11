@@ -9,10 +9,16 @@ Supported `params` keys:
         "ef_construction": int,  # HNSW ef_construction (default: 100)
         "ef_search": int,        # HNSW search-time ef (default: 64)
         "on_disk_payload": bool, # default: False
+        "payload_indexed_fields": list[str],  # fields to index for filter+ANN
     }
 
 Qdrant always uses HNSW for vector search; passing `index="none"` is
 equivalent to a tiny `m` and is not exposed here on purpose.
+
+`payload_indexed_fields` controls payload schema for hybrid filter+ANN
+queries — Qdrant requires the field be indexed with a known type before
+`Filter` clauses can prune the search space. The harness ingests a
+`pid` payload by default; add the keys you intend to filter on.
 """
 
 from __future__ import annotations
@@ -88,6 +94,20 @@ class QdrantAdapter:
                 on_disk=bool(params.get("on_disk_payload", False)),
             ),
         )
+
+        # Pre-create payload indexes so filter+ANN queries don't fall back
+        # to a linear scan of `payload`. Qdrant requires the schema to be
+        # declared up front. We default each indexed field to `keyword` —
+        # the right type for the harness's `pid` and any string tag.
+        indexed_fields = params.get("payload_indexed_fields") or []
+        if isinstance(indexed_fields, list | tuple):
+            for field_name in indexed_fields:
+                client.create_payload_index(
+                    collection_name=self._collection,
+                    field_name=str(field_name),
+                    field_schema=models.PayloadSchemaType.KEYWORD,
+                )
+
         self._dim = dim
         self._params = dict(params)
         self._distance = _DISTANCE_MAP[metric]
