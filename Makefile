@@ -139,6 +139,22 @@ up-pull: ## Pre-pull pgvector + qdrant images so `up --wait` doesn't time out on
 
 .PHONY: up-wait
 up-wait: ## Start containers and wait for healthy (assumes images already pulled)
+	@# Pre-flight: warn early if a host port the bench will publish is
+	@# already allocated. Without this the operator only sees the
+	@# collision after `docker compose` has created the network and
+	@# started pulling layers, which is several seconds of confusing
+	@# "Bind for 0.0.0.0:5433 failed" output. `lsof` is in the macOS /
+	@# Linux base image; `command -v` keeps the recipe portable on the
+	@# rare host without it.
+	@bash -c 'command -v lsof >/dev/null 2>&1 || exit 0; \
+		busy=$$(lsof -nP -iTCP:$(PGVECTOR_PORT) -iTCP:$(QDRANT_PORT) -sTCP:LISTEN 2>/dev/null | awk "NR>1 {print \$$9}" | sed "s/.*://" | sort -u | tr "\n" " "); \
+		if [ -n "$$busy" ]; then \
+			echo "[make up] ports already allocated: $$busy"; \
+			echo "  override the publish port and re-run, e.g.:"; \
+			echo "    make up PGVECTOR_PORT=5444 QDRANT_PORT=6343"; \
+			echo "  current targets: pgvector=$(PGVECTOR_PORT), qdrant=$(QDRANT_PORT)"; \
+			exit 1; \
+		fi'
 	@# Sweep stale "Created" containers from prior failed runs first —
 	@# otherwise `up -d --wait` errors out with "container is already in
 	@# use" and the operator has to manually `docker compose down` before
