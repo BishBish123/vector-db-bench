@@ -5,11 +5,13 @@ from vdbbench.adapters.base import (
     IngestStats,
     VectorStoreAdapter,
 )
+from vdbbench.adapters.chroma import ChromaAdapter
 from vdbbench.adapters.lancedb import LanceDBAdapter
 from vdbbench.adapters.pgvector import PgVectorAdapter
 from vdbbench.adapters.qdrant import QdrantAdapter
 
 __all__ = [
+    "ChromaAdapter",
     "IndexStats",
     "IngestStats",
     "LanceDBAdapter",
