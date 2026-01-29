@@ -47,6 +47,12 @@ help: ## Show this help
 .PHONY: install
 install: ## Install all extras + dev tooling (platform-gated extras are skipped where wheels are unavailable)
 	$(UV) sync --extra dev --extra embed --extra chroma --extra lance
+	@# Surface platform gating: on Intel macOS the embed/chroma/lance
+	@# extras silently no-op (no wheels) and `make install` still exits
+	@# 0, leaving the operator with a 2-adapter harness and no signal.
+	@# This probe prints OK / SKIP per optional dep so the gap is obvious
+	@# at install time rather than at bench-demo time.
+	@$(UV) run python scripts/check_adapter_availability.py
 
 .PHONY: install-min
 install-min: ## Install only core + dev (no embed/chroma/lance — Intel macOS path)
