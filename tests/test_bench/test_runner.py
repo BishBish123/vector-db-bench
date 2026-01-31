@@ -95,8 +95,10 @@ class TestBenchSpec:
             BenchSpec(adapter=_MemAdapter(), repeats=0)
 
     def test_negative_warmup(self) -> None:
+        # `-1` is the sentinel for "use the profile default" — pick `-2` to
+        # actually trip the validation.
         with pytest.raises(ValueError, match="warmup"):
-            BenchSpec(adapter=_MemAdapter(), warmup_queries=-1)
+            BenchSpec(adapter=_MemAdapter(), warmup_queries=-2)
 
     def test_params_hash_stable(self) -> None:
         a = BenchSpec(adapter=_MemAdapter(), params={"a": 1, "b": 2})
@@ -183,3 +185,46 @@ class TestRunBench:
         result = run_bench(encoded, [spec])
         # Each query slept ~2ms; allow some slack for scheduler jitter.
         assert (result.timings["latency_ms"] >= 1.5).all()
+
+    def test_summary_includes_p99_and_profile(self) -> None:
+        encoded = _toy_encoded()
+        spec = BenchSpec(adapter=_MemAdapter(), k=2, warmup_queries=0, repeats=4)
+        result = run_bench(encoded, [spec])
+        row = result.summary.iloc[0]
+        assert "latency_ms_p99" in result.summary.columns
+        assert row["latency_ms_p99"] >= row["latency_ms_p95"]
+        assert row["profile"] == "warm"
+
+
+class TestBenchSpecProfile:
+    def test_warm_is_default(self) -> None:
+        spec = BenchSpec(adapter=_MemAdapter())
+        assert spec.profile == "warm"
+        assert spec.warmup_queries == 10
+        assert spec.repeats == 1
+
+    def test_cold_profile_zero_warmup(self) -> None:
+        spec = BenchSpec(adapter=_MemAdapter(), profile="cold")
+        assert spec.warmup_queries == 0
+        assert spec.repeats == 1
+
+    def test_p99_profile_high_warmup_and_repeats(self) -> None:
+        spec = BenchSpec(adapter=_MemAdapter(), profile="p99")
+        assert spec.warmup_queries == 50
+        assert spec.repeats == 5
+
+    def test_explicit_warmup_overrides_profile(self) -> None:
+        spec = BenchSpec(adapter=_MemAdapter(), profile="p99", warmup_queries=2)
+        assert spec.warmup_queries == 2
+        # repeats still pulls from the profile default since not overridden.
+        assert spec.repeats == 5
+
+    def test_unknown_profile_rejected(self) -> None:
+        with pytest.raises(ValueError, match="unknown profile"):
+            BenchSpec(adapter=_MemAdapter(), profile="bogus")
+
+    def test_profile_recorded_in_summary(self) -> None:
+        encoded = _toy_encoded()
+        spec = BenchSpec(adapter=_MemAdapter(), k=2, profile="cold")
+        result = run_bench(encoded, [spec])
+        assert result.summary.iloc[0]["profile"] == "cold"
