@@ -85,11 +85,19 @@ plots: ## Regenerate analysis plots from results/raw.parquet
 	$(UV) run vdbbench plot
 
 # ---------------------------------------------------------------------------
-# Containers — wired in Phase 2 alongside the docker-compose.yml.
+# Containers
 # ---------------------------------------------------------------------------
-# .PHONY: up down
-# up:    docker compose up -d        # pgvector, qdrant
-# down:  docker compose down -v
+.PHONY: up
+up: ## Bring up pgvector + qdrant containers (and wait for healthy)
+	docker compose up -d --wait
+
+.PHONY: down
+down: ## Tear down containers and remove their volumes
+	docker compose down -v
+
+.PHONY: ps
+ps: ## Show container status
+	docker compose ps
 
 # ---------------------------------------------------------------------------
 # Hygiene
