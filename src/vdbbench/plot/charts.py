@@ -97,13 +97,52 @@ def plot_axis_bars(
     ax.bar(range(len(labels)), values, color=colors)
     ax.set_xticks(range(len(labels)))
     ax.set_xticklabels(labels, rotation=45, ha="right", fontsize=8)
-    if log:
+    # `set_yscale("log")` warns and silently falls back when all values are
+    # ≤ 0 (e.g. ingest=0 for embedded adapters with instant ingest, or
+    # bytes_disk=0 for in-memory references). Keep linear in that case.
+    if log and any(v is not None and v > 0 for v in values):
         ax.set_yscale("log")
     ax.set_ylabel(ylabel)
     ax.set_title(title)
     ax.grid(True, which="both", axis="y", linestyle="--", alpha=0.4)
     fig.tight_layout()
     paths = _save_both(fig, out_path, name)
+    plt.close(fig)
+    return paths
+
+
+def plot_speedup_vs_baseline(
+    summary: pd.DataFrame,
+    out: str | Path,
+    *,
+    baseline_db: str = "chroma",
+) -> tuple[Path, Path]:
+    """Per-DB speedup over `baseline_db` p95 latency.
+
+    Speedup = baseline_p95 / db_p95. >1 means faster than baseline. The
+    baseline itself is shown as a 1.0 reference bar so the chart still
+    makes sense when chroma isn't in the run.
+    """
+    out_path = _ensure_outdir(out)
+    if baseline_db not in summary["db"].values:
+        # Baseline not in the run — fall back to picking the first DB by
+        # name (deterministic) so the chart is still informative.
+        baseline_db = sorted(summary["db"].unique())[0]
+    baseline_lat = float(summary[summary["db"] == baseline_db]["latency_ms_p95"].mean())
+
+    fig, ax = plt.subplots(figsize=(10, 6))
+    speedups = (baseline_lat / summary["latency_ms_p95"]).tolist()
+    labels = summary["label"].tolist()
+    colors = [_DB_COLORS.get(db, "#666666") for db in summary["db"]]
+    ax.bar(range(len(labels)), speedups, color=colors)
+    ax.axhline(1.0, color="black", linewidth=0.8, linestyle="--", alpha=0.6)
+    ax.set_xticks(range(len(labels)))
+    ax.set_xticklabels(labels, rotation=45, ha="right", fontsize=8)
+    ax.set_ylabel(f"Speedup vs {baseline_db} (p95 latency, higher = faster)")
+    ax.set_title(f"p95 latency speedup relative to {baseline_db}")
+    ax.grid(True, axis="y", linestyle="--", alpha=0.4)
+    fig.tight_layout()
+    paths = _save_both(fig, out_path, "speedup")
     plt.close(fig)
     return paths
 
@@ -119,16 +158,16 @@ def plot_all(summary_path: str | Path, out: str | Path) -> dict[str, tuple[Path,
             summary,
             out,
             column="recall_at_k_mean",
-            title="Recall@k (mean)",
-            ylabel="Recall",
+            title="Recall@k (mean) — higher is better",
+            ylabel="Recall@k",
             name="recall",
         ),
         "latency": plot_axis_bars(
             summary,
             out,
             column="latency_ms_p95",
-            title="p95 query latency",
-            ylabel="ms",
+            title="p95 query latency (lower is better)",
+            ylabel="latency (ms, log scale)",
             name="latency",
             log=True,
         ),
@@ -136,8 +175,8 @@ def plot_all(summary_path: str | Path, out: str | Path) -> dict[str, tuple[Path,
             summary,
             out,
             column="ingest_throughput_vps",
-            title="Ingest throughput",
-            ylabel="vectors / sec",
+            title="Ingest throughput (higher is better)",
+            ylabel="vectors / sec (log scale)",
             name="ingest",
             log=True,
         ),
@@ -145,9 +184,10 @@ def plot_all(summary_path: str | Path, out: str | Path) -> dict[str, tuple[Path,
             summary,
             out,
             column="index_bytes",
-            title="Index disk footprint",
-            ylabel="bytes",
+            title="Index disk footprint (lower is better)",
+            ylabel="bytes (log scale)",
             name="index_disk",
             log=True,
         ),
+        "speedup": plot_speedup_vs_baseline(summary, out),
     }

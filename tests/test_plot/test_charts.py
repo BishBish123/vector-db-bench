@@ -7,7 +7,12 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from vdbbench.plot.charts import plot_all, plot_axis_bars, plot_pareto_frontier
+from vdbbench.plot.charts import (
+    plot_all,
+    plot_axis_bars,
+    plot_pareto_frontier,
+    plot_speedup_vs_baseline,
+)
 
 
 def _toy_summary() -> pd.DataFrame:
@@ -79,7 +84,7 @@ class TestCharts:
         path = tmp_path / "summary.parquet"
         df.to_parquet(path, index=False)
         result = plot_all(path, tmp_path / "out")
-        for name in ("pareto", "recall", "latency", "ingest", "index_disk"):
+        for name in ("pareto", "recall", "latency", "ingest", "index_disk", "speedup"):
             png, svg = result[name]
             assert png.exists() and svg.exists()
 
@@ -88,3 +93,13 @@ class TestCharts:
         pd.DataFrame(columns=_toy_summary().columns).to_parquet(empty, index=False)
         with pytest.raises(ValueError, match="empty"):
             plot_all(empty, tmp_path / "out")
+
+    def test_speedup_chart_with_explicit_baseline(self, tmp_path: Path) -> None:
+        png, svg = plot_speedup_vs_baseline(_toy_summary(), tmp_path, baseline_db="pgvector")
+        assert png.exists() and svg.exists()
+
+    def test_speedup_chart_falls_back_when_baseline_missing(self, tmp_path: Path) -> None:
+        """If chroma isn't in the run, the chart still gets produced."""
+        df = _toy_summary()  # only pgvector + qdrant
+        png, svg = plot_speedup_vs_baseline(df, tmp_path, baseline_db="chroma")
+        assert png.exists() and svg.exists()
