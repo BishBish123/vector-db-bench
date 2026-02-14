@@ -88,18 +88,23 @@ make up
 
 # 3. Demo run — 5 000 synthetic vectors, ~30 seconds end-to-end.
 #    `make bench-demo` is the one-command wrapper for exactly the steps below.
+#    Prefer `make bench-demo` over the by-hand commands when you've
+#    overridden PGVECTOR_PORT / QDRANT_PORT — the make target threads
+#    those vars into the bench DSN/URL automatically; the manual
+#    commands hardcode the defaults.
 make bench-demo
-# ...or run them by hand:
+# ...or run them by hand (uses the env-var defaults; if you've rebound
+# either container port, swap in $PGVECTOR_PORT / $QDRANT_PORT):
 uv run vdbbench prep   --out data/encoded-demo --dataset synthetic --sample-size 5000 --dim 64
 uv run vdbbench bench  --encoded data/encoded-demo --out results/demo \
-                       --pgvector-dsn postgresql://bench:bench@localhost:5433/bench \
-                       --qdrant-url http://localhost:6333
+                       --pgvector-dsn postgresql://bench:bench@localhost:${PGVECTOR_PORT:-5433}/bench \
+                       --qdrant-url http://localhost:${QDRANT_PORT:-6333}
 uv run vdbbench plot   --summary results/demo/summary.parquet --out assets
 ```
 
 For a larger sweep on the same laptop, `make bench-100k` runs the pipeline at 100 000 *synthetic* vectors (configurable via `SAMPLE_SIZE`) and writes to `results/100k/` — it's a scale-up smoke test for the harness, not an MS-MARCO run. Only `make bench-1m` switches the corpus to MS-MARCO; that is the canonical full sweep below.
 
-`results/demo/summary.parquet`, the matching `timings.parquet`, and the `bench_manifest.json` from the run that produced them are checked into the repo — a reviewer can run only step 4 (the plot) and inspect the published numbers without bringing services up. The manifest captures encoder identity, adapter versions, encoded-bundle fingerprint, and host metadata so the parquet is auditable, not just present.
+`results/demo/summary.parquet`, the matching `timings.parquet`, and the `bench_manifest.json` from the run that produced them are checked into the repo — a reviewer can run just the [Re-plot only](#re-plot-only-no-docker-required) path above and inspect the published numbers without bringing services up. The manifest captures encoder identity, adapter versions, encoded-bundle fingerprint, and host metadata so the parquet is auditable, not just present.
 
 ### Full (1 M MS-MARCO, the canonical benchmark)
 

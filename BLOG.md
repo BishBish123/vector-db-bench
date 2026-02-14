@@ -63,10 +63,18 @@ git clone https://github.com/BishBish123/vector-db-bench.git
 cd vector-db-bench
 make install
 make up
+# `make bench-demo` is the recommended one-shot — it threads
+# PGVECTOR_PORT / QDRANT_PORT into the bench DSN/URL automatically,
+# so `make up PGVECTOR_PORT=5444` followed by `make bench-demo
+# PGVECTOR_PORT=5444` is enough to relocate the whole pipeline off
+# the default 5433. The expanded form below uses the env-var defaults;
+# swap in $PGVECTOR_PORT / $QDRANT_PORT if you've rebound either.
+make bench-demo
+# ...or run them by hand:
 uv run vdbbench prep   --out data/encoded-demo --dataset synthetic --sample-size 5000 --dim 64
 uv run vdbbench bench  --encoded data/encoded-demo --out results/demo \
-                       --pgvector-dsn postgresql://bench:bench@localhost:5433/bench \
-                       --qdrant-url http://localhost:6333
+                       --pgvector-dsn postgresql://bench:bench@localhost:${PGVECTOR_PORT:-5433}/bench \
+                       --qdrant-url http://localhost:${QDRANT_PORT:-6333}
 uv run vdbbench plot   --summary results/demo/summary.parquet --out assets
 ```
 
