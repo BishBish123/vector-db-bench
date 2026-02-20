@@ -72,9 +72,7 @@ def prep(
         from vdbbench.embed import SentenceTransformerEncoder  # noqa: PLC0415
 
         encoder = SentenceTransformerEncoder(model_name=embed_model)
-        encoded = encode_corpus(
-            bundle, encoder, metadata={"dataset": dataset, "seed": seed}
-        )
+        encoded = encode_corpus(bundle, encoder, metadata={"dataset": dataset, "seed": seed})
     encoded.save(out)
     console.print(f"[green]wrote[/] encoded bundle to {out}")
 
@@ -97,6 +95,10 @@ def bench(
     ),
     k: int = typer.Option(10, help="Top-k for retrieval."),
     repeats: int = typer.Option(1, help="Number of measured query passes per spec."),
+    profile: str = typer.Option(
+        "warm",
+        help="Bench profile: 'cold' (no warm-up), 'warm' (default), 'p99' (50 warm-up + 5 repeats).",
+    ),
 ) -> None:
     """Run the bench across every adapter the user enabled by passing a DSN/path."""
     from vdbbench.bench import BenchSpec, run_bench  # noqa: PLC0415
@@ -114,6 +116,7 @@ def bench(
                 k=k,
                 repeats=repeats,
                 label="pgvector:hnsw-default",
+                profile=profile,
             )
         )
     if qdrant_url:
@@ -126,6 +129,7 @@ def bench(
                 k=k,
                 repeats=repeats,
                 label="qdrant:hnsw-default",
+                profile=profile,
             )
         )
     if lancedb_path:
@@ -138,6 +142,7 @@ def bench(
                 k=k,
                 repeats=repeats,
                 label="lancedb:ivf_pq-default",
+                profile=profile,
             )
         )
     if chroma_path:
@@ -150,6 +155,7 @@ def bench(
                 k=k,
                 repeats=repeats,
                 label="chroma:default",
+                profile=profile,
             )
         )
 
