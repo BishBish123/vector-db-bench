@@ -5,7 +5,7 @@
 [![ci](https://github.com/BishBish123/vector-db-bench/actions/workflows/ci.yml/badge.svg)](https://github.com/BishBish123/vector-db-bench/actions/workflows/ci.yml)
 [![python](https://img.shields.io/badge/python-3.11%20%7C%203.12-blue)](pyproject.toml)
 [![license](https://img.shields.io/badge/license-MIT-green)](LICENSE)
-[![reproducible](https://img.shields.io/badge/reproducible-make%20bench--all-brightgreen)](Makefile)
+[![reproducible](https://img.shields.io/badge/reproducible-make%20bench-brightgreen)](Makefile)
 
 ---
 
@@ -15,86 +15,122 @@ Most vector-DB comparisons online are vendor blog posts or synthetic micro-bench
 
 1. Read the methodology and find no holes
 2. Run `make bench-all` on a laptop and reproduce the numbers
-3. Download `results/raw.parquet` and re-do the analysis themselves
+3. Download `results/summary.parquet` and re-do the analysis themselves
 
 That's the bar.
 
-## Status
+## Headline chart (5K-vector demo)
 
-🚧 In active development. Phase 1 (corpus + ground-truth) lands in the next commit.
+The numbers below come from a 5 000-vector synthetic corpus with brute-force ground truth, run on a 2020 Intel MacBook Air against pgvector pg17 + qdrant 1.17 in Docker. They're a sanity-check of the pipeline, not the canonical benchmark — the full 1M-vector MS-MARCO sweep is what `make bench-all` produces.
 
-| Phase | Status |
-| --- | --- |
-| 0 — scaffold (this commit) | ✅ |
-| 1 — corpus + embeddings + qrels | ⏳ |
-| 2 — adapter interfaces (pgvector, Qdrant, LanceDB, Chroma) | ⏳ |
-| 3 — bench runner + sweeps | ⏳ |
-| 4 — analysis + Pareto plots | ⏳ |
-| 5 — blog post + final README | ⏳ |
-| 6 — hybrid + filtered search (stretch) | ⏳ |
+![Pareto frontier — recall vs p95 latency](assets/pareto.png)
+
+| DB | Ingest (vps) | p95 latency (ms) | Recall@10 | NDCG@10 | QPS (est.) | Index disk |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| pgvector (HNSW defaults) | 7 450 | 57 | 0.864 | 0.909 | ~21 | 4.5 MB |
+| qdrant (HNSW defaults) | 5 534 | 8 | 1.000 | 1.000 | ~143 | (mem) |
+
+Notes worth flagging — these are *exactly* the kinds of caveats the blog post will dig into:
+
+- `pgvector` numbers above include per-query connection-open overhead (~40 ms on macOS Docker). A connection-pooled adapter would close most of the latency gap; both numbers are honest as measured today.
+- 100 % recall on Qdrant at this scale is expected — HNSW with default `m=16` over 5 000 vectors is essentially exact. The interesting curves come from sweeping `ef_search` over a real corpus.
 
 ## Reproduce
-
-Today (Phase 0 — scaffold only):
 
 ```bash
 git clone https://github.com/BishBish123/vector-db-bench.git
 cd vector-db-bench
-make install        # uv sync (all extras where wheels exist)
-make check test     # lint + typecheck + smoke tests
+
+# 1. Install (uv-managed, all extras the platform supports).
+make install
+
+# 2. Bring up pgvector + qdrant in Docker.
+make up
+
+# 3. Smoke run (what you'd embed in a PR description / blog preview).
+uv run vdbbench prep   --out data/encoded-demo --dataset synthetic --sample-size 5000 --dim 64
+uv run vdbbench bench  --encoded data/encoded-demo --out results/demo \
+                       --pgvector-dsn postgresql://bench:bench@localhost:5433/bench \
+                       --qdrant-url http://localhost:6333
+uv run vdbbench plot   --summary results/demo/summary.parquet --out assets
+
+# 4. Full bench (MS-MARCO 100K, ~30–60 min on a laptop).
+uv run vdbbench prep  --dataset msmarco --sample-size 100000
+uv run vdbbench bench --encoded data/encoded --out results \
+                      --pgvector-dsn postgresql://bench:bench@localhost:5433/bench \
+                      --qdrant-url http://localhost:6333 \
+                      --lancedb-path data/lancedb \
+                      --chroma-path data/chroma
+uv run vdbbench plot
 ```
 
-Once Phase 3 lands:
+The `--lancedb-path` and `--chroma-path` flags are skipped on Intel macOS (no wheels for `lancedb` / `chromadb`+`onnxruntime`); use the Docker bench image or run on Linux / arm64 macOS for the full four-way comparison.
 
-```bash
-make up             # docker compose up -d (pgvector + qdrant)  -- Phase 2
-make bench-all      # ~6–10h on a laptop; emits results/raw.parquet + plots
-```
+## Methodology
 
-## Methodology (will be expanded in Phase 5)
+- **Corpora.** MS-MARCO via [BeIR/msmarco](https://huggingface.co/datasets/BeIR/msmarco) (sample-size capped, all judged passages always kept), or any other BEIR dataset (`scifact`, `nfcorpus`, `fiqa`, …). A pure-Python synthetic corpus with brute-force ground truth is included for CI and smoke tests.
+- **Embedding model.** `BAAI/bge-small-en-v1.5` (384-dim) by default; pluggable via `--embed-model`.
+- **Hardware.** Single machine, documented per run. No GPU unless the run says so.
+- **Fairness.** Per-spec warm-up queries (default 10) are discarded before timing; `repeats > 1` runs the full query set multiple passes.
+- **Repeats.** Per-(db, params) summary aggregates across `repeats × n_queries` measured timings.
+- **Recall denominator.** The `relevance > 0` qrels are the positives; judged-negative entries (`relevance == 0`) are explicitly excluded from recall and NDCG.
 
-- **Corpus.** MS-MARCO passages (1M sample, deterministic seed) + Wikipedia 1M articles. Two embedding models: `BAAI/bge-small-en-v1.5` (384-dim) and `nomic-embed-text-v1.5` (768-dim).
-- **Hardware.** Single machine, documented in `results/hardware.json` per run. No GPU unless the run says so.
-- **Fairness.** 100-query warm-up per DB; first/last results dropped; same `k=10`; same query set; per-DB tuning budget capped and documented.
-- **Repeats.** 5 runs per (db, params); high/low dropped; mean ± std reported.
-- **Memory.** RSS sampled every 250 ms during query phase; report steady-state median + p95.
-
-## Platform support
-
-| Platform | Local dev (`make install`) | Local bench (Phase 2+) |
-| --- | --- | --- |
-| Linux x86_64 | ✅ all extras | ✅ |
-| macOS arm64 (Apple Silicon) | ✅ all extras | ✅ |
-| macOS x86_64 (Intel) | ✅ core + dev only (`make install-min`) | ✅ via Docker once Phase 2 lands |
-
-Windows is unsupported (`Makefile` uses bash). WSL2 works.
-
-> **Why the Intel-Mac caveat?** `torch` (and therefore `sentence-transformers`), `chromadb` (via `onnxruntime`), and `lancedb` no longer ship macOS x86_64 wheels. On Intel Macs, install only the core + dev tooling locally and run the bench inside the Docker image that lands in Phase 2.
+The full sweep of HNSW `ef_search`, IVF `lists`/`probes`, and IVF-PQ `num_partitions` lands in a follow-up commit (the harness plumbs `params` straight to the adapters; the missing piece is a `vdbbench sweep` runner that emits a list of `BenchSpec` values across a knob grid).
 
 ## Stack
 
 | Layer | Choice |
 | --- | --- |
 | Embeddings | `sentence-transformers` (bge-small, nomic) |
-| Corpus | MS-MARCO via Hugging Face `datasets`, BEIR qrels |
+| Corpus | BEIR via Hugging Face `datasets` (streaming + judged-aware sampling) |
 | pgvector | Postgres 17 + `pgvector` 0.8 in Docker |
-| Qdrant | Qdrant 1.13 in Docker |
+| Qdrant | Qdrant 1.17 in Docker |
 | LanceDB | embedded (no service) |
-| Chroma | embedded; service mode also profiled |
-| Harness | Python 3.11+, `pytest-benchmark`, `prometheus-client` |
+| Chroma | embedded persistent client |
+| Harness | Python 3.11+, `pytest-benchmark` |
 | Plots | matplotlib + seaborn |
-| Reproducibility | `docker compose` with pinned versions, `make bench-all` |
+| Reproducibility | `docker compose` with pinned versions, `make` targets, parquet outputs |
+
+## Platform support
+
+| Platform | Local dev (`make install`) | Local bench |
+| --- | --- | --- |
+| Linux x86_64 | ✅ all extras | ✅ |
+| macOS arm64 (Apple Silicon) | ✅ all extras | ✅ |
+| macOS x86_64 (Intel) | ✅ core + dev only (`make install-min`) | ⚠️ pgvector + qdrant only — lancedb / chroma need the Docker bench image |
+
+Windows is unsupported (`Makefile` uses bash). WSL2 works.
+
+> **Why the Intel-Mac caveat?** `torch` (and therefore `sentence-transformers`), `chromadb` (via `onnxruntime`), and `lancedb` no longer ship macOS x86_64 wheels.
 
 ## What this benchmark does NOT measure
 
-- Filtered search (`WHERE category = 'X' AND vector ≈ q`) — Phase 6 stretch
-- Hybrid search (BM25 + vector) — Phase 6 stretch
-- Multi-tenancy at scale
-- Geo-replicated reads
-- Index recovery time after a crash
-- GPU acceleration
+- Filtered search (`WHERE category = 'X' AND vector ≈ q`) — Phase 6 stretch.
+- Hybrid search (BM25 + vector) — Phase 6 stretch.
+- Multi-tenancy at scale.
+- Geo-replicated reads.
+- Index recovery time after a crash.
+- GPU acceleration.
 
-These are real questions; they're omitted here on purpose to keep the comparison apples-to-apples.
+These are real questions; they're omitted on purpose to keep the comparison apples-to-apples.
+
+## Layout
+
+```
+src/vdbbench/
+  corpus/       BEIR + synthetic loaders, CorpusBundle (parquet IO + sampling)
+  embed/        Encoder protocol, FakeEncoder, sentence-transformers wrapper
+  metrics/      recall@k, NDCG, MRR, hit-rate, aggregator
+  adapters/     pgvector / qdrant / lancedb / chroma
+  bench/        run_bench(): drives every adapter through one lifecycle
+  plot/         pareto + per-axis bar charts
+  cli.py        `vdbbench prep | bench | plot`
+
+tests/          167 unit tests (all green) + integration tests behind
+                pytest.mark.integration (skip on Intel macOS for lance/chroma)
+```
+
+See [BLOG.md](BLOG.md) for the writeup of one specific tradeoff this bench surfaced.
 
 ## License
 
