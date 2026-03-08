@@ -21,6 +21,8 @@ That's the bar.
 
 > **Demo vs full.** The numbers in this README and the parquet checked into `results/demo/` come from a 5 000-vector synthetic sanity sweep — small enough to ship in the repo and re-run on a laptop in seconds. The canonical full sweep is a 1 M-vector MS-MARCO run produced by `make bench-1m` and persisted to `results/full/summary.parquet` (not committed; the recipe is below). When the README cites "Pareto frontier" or "p95 latency", it means the demo unless explicitly tagged `[full]`.
 
+> **Adapter coverage of the committed demo parquet.** The `results/demo/summary.parquet` checked in here is the **2-adapter** sweep (pgvector + qdrant) captured on the published bench host — an Intel macOS laptop where `lancedb` and `chromadb` have no wheels. A reviewer running `make bench-demo` on Linux / Apple Silicon / WSL2 regenerates a **4-row** parquet with all four adapters; the chart will look different (an extra two points on the Pareto frontier) and that is expected, not a regression. See the Platform support table below for the wheel availability matrix.
+
 ## Headline chart (5K-vector demo)
 
 The numbers below come from a 5 000-vector synthetic corpus with brute-force ground truth, run on a 2020 Intel MacBook Air against pgvector pg17 + qdrant 1.17 in Docker. They're a sanity-check of the pipeline, not the canonical benchmark — `make bench-1m` is what produces the full 1 M-vector MS-MARCO sweep.
@@ -195,6 +197,19 @@ docs/
 ```
 
 See [BLOG.md](BLOG.md) for the writeup of one specific tradeoff this bench surfaced, [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the layered design, and the [docs/adr/](docs/adr/) directory for the design decisions.
+
+## Running the tests
+
+```bash
+make test           # unit tests only — `not integration and not slow`
+make test-integration   # requires Docker (skipped without containers up)
+make test-all       # unit + integration + slow (the full suite)
+```
+
+`make test` is the canonical local invocation — it filters out `slow`
+and `integration` markers so a clean run finishes in seconds rather
+than the minutes a full `uv run pytest` would take. Use `make test-all`
+before publishing benchmark numbers; CI runs the same matrix.
 
 ## License
 

@@ -117,6 +117,11 @@ smoke: ## End-to-end offline smoke (no Docker, no model download) — exercises 
 
 .PHONY: bench-demo
 bench-demo: ## Demo pipeline reproducing the README numbers: synthetic 5k vectors @ dim=64, writes results/demo/
+	@# The committed `results/demo/summary.parquet` was captured on an
+	@# Intel macOS host where lancedb and chromadb have no wheels, so it
+	@# contains 2 rows (pgvector + qdrant). A run on Linux / Apple
+	@# Silicon / WSL2 will produce 4 rows; that's a wider sweep, not a
+	@# regression. See the README's "Platform support" table.
 	$(UV) run vdbbench prep  --out data/encoded-demo --dataset synthetic --sample-size 5000 --dim 64
 	$(UV) run vdbbench bench --encoded data/encoded-demo --out results/demo --all \
 		--pgvector-dsn $(PGVECTOR_DSN) --qdrant-url $(QDRANT_URL)
