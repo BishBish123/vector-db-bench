@@ -64,3 +64,27 @@ jobs:
 
       - name: Unit tests
         run: uv run pytest -m "not integration and not slow" --cov --cov-report=term
+
+  smoke-pipeline:
+    # End-to-end synthetic smoke run: corpus → encode → bench → plot, all
+    # offline (FakeEncoder + reference adapter), so we exercise the full
+    # pipeline on every PR in seconds without spinning up Postgres or
+    # Qdrant containers.
+    runs-on: ubuntu-latest
+    needs: lint-and-test
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Sync core deps
+        run: uv sync --extra dev --python 3.12
+
+      - name: Run synthetic pipeline smoke
+        run: uv run python scripts/smoke_pipeline.py --out smoke-out
