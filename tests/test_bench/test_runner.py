@@ -228,6 +228,74 @@ class TestRunBench:
         assert result.skipped[0].error_type == "OperationalError"
         assert "connection failed" in result.skipped[0].reason
 
+    def test_tolerate_failures_skips_qdrant_response_handling_exception(self) -> None:
+        """``qdrant_client.http.exceptions.ResponseHandlingException`` is the
+        wrapper qdrant_client raises when the underlying httpx connect
+        fails. Its MRO is `ResponseHandlingException -> ApiException ->
+        Exception` — no `OSError` ancestor — so the tolerated-failure
+        tuple has to list it explicitly. Without this, a dead Qdrant in
+        ``--all`` mode dumped a full traceback instead of cleanly
+        skipping qdrant.
+        """
+        from qdrant_client.http.exceptions import (  # noqa: PLC0415
+            ResponseHandlingException,
+        )
+
+        encoded = _toy_encoded()
+
+        class QdrantUnreachableAdapter(_MemAdapter):
+            name = "qdrant-fake"
+
+            def setup(self, dim: int, params: dict[str, object]) -> None:
+                # Match the wrapper qdrant_client surfaces for connect
+                # failures. The constructor takes a `source` kwarg in
+                # newer releases; pass a plain ConnectionError so the
+                # test doesn't lock to a single qdrant_client minor.
+                raise ResponseHandlingException(
+                    source=ConnectionError("Connection refused: no qdrant on :6333")
+                )
+
+        good = BenchSpec(adapter=_MemAdapter(), params={"v": "good"}, k=2)
+        bad = BenchSpec(adapter=QdrantUnreachableAdapter(), params={"v": "bad"}, k=2)
+        result = run_bench(encoded, [bad, good], tolerate_failures=True)
+
+        assert len(result.summary) == 1
+        assert result.summary.iloc[0]["db"] == "mem"
+        assert len(result.skipped) == 1
+        assert result.skipped[0].db == "qdrant-fake"
+        assert result.skipped[0].error_type == "ResponseHandlingException"
+
+    def test_tolerate_failures_skips_httpx_transport_error(self) -> None:
+        """Bare `httpx.TransportError` (e.g. ConnectError, ReadTimeout) can
+        leak past qdrant_client's wrapper if the request happens outside a
+        ResponseHandlingException-protected codepath. The tolerated-failure
+        tuple lists `httpx.TransportError` so a transport-level failure on
+        any adapter using httpx (qdrant today, future gRPC clients) lands
+        in the structured-skip path instead of aborting the whole
+        ``--all`` run.
+        """
+        import httpx  # noqa: PLC0415
+
+        encoded = _toy_encoded()
+
+        class HttpxFailingAdapter(_MemAdapter):
+            name = "httpx-fake"
+
+            def setup(self, dim: int, params: dict[str, object]) -> None:
+                # ConnectError is a TransportError; either the bare class
+                # or the more specific subclass should be tolerated.
+                raise httpx.ConnectError("connect refused")
+
+        good = BenchSpec(adapter=_MemAdapter(), params={"v": "good"}, k=2)
+        bad = BenchSpec(adapter=HttpxFailingAdapter(), params={"v": "bad"}, k=2)
+        result = run_bench(encoded, [bad, good], tolerate_failures=True)
+
+        assert len(result.summary) == 1
+        assert result.summary.iloc[0]["db"] == "mem"
+        assert len(result.skipped) == 1
+        assert result.skipped[0].db == "httpx-fake"
+        assert result.skipped[0].error_type == "ConnectError"
+
     def test_tolerate_failures_does_not_swallow_real_bugs(self) -> None:
         """A non-connection error is still a real bug — must propagate
         even in tolerant mode, otherwise we'd mask harness regressions."""
