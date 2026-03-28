@@ -126,11 +126,19 @@ src/vdbbench/
   plot/         pareto + per-axis bar charts
   cli.py        `vdbbench prep | bench | plot`
 
-tests/          167 unit tests (all green) + integration tests behind
+tests/          200+ unit tests (all green) + integration tests behind
                 pytest.mark.integration (skip on Intel macOS for lance/chroma)
+
+docs/
+  ARCHITECTURE.md        layered design + determinism invariants
+  adr/
+    ADR-001-...           why these four adapters
+    ADR-002-...           recall@k vs NDCG vs MRR
+    ADR-003-...           HNSW vs IVFFLAT vs IVF-PQ
+    ADR-004-...           why ship a deterministic FakeEncoder
 ```
 
-See [BLOG.md](BLOG.md) for the writeup of one specific tradeoff this bench surfaced.
+See [BLOG.md](BLOG.md) for the writeup of one specific tradeoff this bench surfaced, [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the layered design, and the [docs/adr/](docs/adr/) directory for the design decisions.
 
 ## License
 
