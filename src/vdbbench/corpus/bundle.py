@@ -300,26 +300,47 @@ class CorpusBundle:
     def merge(self, other: Self, name: str | None = None) -> Self:
         """Combine `self` and `other` into a single bundle.
 
-        Passage and query ids are unioned with first-wins de-duplication
-        (`self` precedes `other`). Qrels are unioned and de-duplicated by
-        `(qid, pid)` — if both bundles judge the same pair with different
-        relevance grades, that's a conflict and we raise rather than pick
-        one silently. The result's metadata gets a `merged_from` key with
-        both source fingerprints so the lineage is recoverable.
+        Passage and query ids are unioned. If both bundles carry a row for
+        the same `pid` (or `qid`) with **different** text, that's a
+        conflict and we raise rather than silently dropping one — the same
+        invariant we apply to qrel grade conflicts. If the text matches
+        exactly, dedup keeps the first occurrence. Topic conflicts are
+        handled the same way: equal or one-sided-empty topics merge
+        cleanly; non-empty disagreement raises.
+
+        The result's metadata gets a `merged_from` key with both source
+        fingerprints so the lineage is recoverable.
         """
         if not isinstance(other, CorpusBundle):
             raise TypeError(f"merge expects a CorpusBundle, got {type(other)!r}")
 
-        passages = (
-            pd.concat([self.passages, other.passages], ignore_index=True)
-            .drop_duplicates(subset=["pid"], keep="first")
-            .reset_index(drop=True)
+        # ---- passage text-conflict check ----
+        passage_concat = pd.concat([self.passages, other.passages], ignore_index=True)
+        p_conflicts = (
+            passage_concat.groupby("pid")["text"].nunique(dropna=False).reset_index(name="n")
         )
-        queries = (
-            pd.concat([self.queries, other.queries], ignore_index=True)
-            .drop_duplicates(subset=["qid"], keep="first")
-            .reset_index(drop=True)
+        bad_pids = p_conflicts.loc[p_conflicts["n"] > 1, "pid"].tolist()
+        if bad_pids:
+            raise ValueError(
+                f"merge: {len(bad_pids)} pid(s) have conflicting passage text across "
+                f"the two bundles (first: {sorted(bad_pids)[:3]})"
+            )
+        passages = passage_concat.drop_duplicates(subset=["pid"], keep="first").reset_index(
+            drop=True
         )
+
+        # ---- query text-conflict check ----
+        query_concat = pd.concat([self.queries, other.queries], ignore_index=True)
+        q_conflicts = (
+            query_concat.groupby("qid")["text"].nunique(dropna=False).reset_index(name="n")
+        )
+        bad_qids = q_conflicts.loc[q_conflicts["n"] > 1, "qid"].tolist()
+        if bad_qids:
+            raise ValueError(
+                f"merge: {len(bad_qids)} qid(s) have conflicting query text across "
+                f"the two bundles (first: {sorted(bad_qids)[:3]})"
+            )
+        queries = query_concat.drop_duplicates(subset=["qid"], keep="first").reset_index(drop=True)
 
         qrels_combined = pd.concat([self.qrels, other.qrels], ignore_index=True)
         # Detect conflicting grades for the same (qid, pid) pair before
@@ -336,16 +357,31 @@ class CorpusBundle:
             drop=True
         )
 
+        # ---- topic conflict (metadata-level) ----
+        # Topics are tracked under `metadata["topic"]`. If both sides carry
+        # a non-empty topic and they disagree, refuse the merge. If one
+        # side is empty/missing, the non-empty value wins.
+        self_topic = str(self.metadata.get("topic") or "")
+        other_topic = str(other.metadata.get("topic") or "")
+        if self_topic and other_topic and self_topic != other_topic:
+            raise ValueError(
+                f"merge: topic conflict — {self_topic!r} (self) vs {other_topic!r} (other)"
+            )
+        merged_topic = self_topic or other_topic
+
         merged_name = name if name is not None else f"{self.name}+{other.name}"
+        merged_metadata: dict[str, object] = {
+            "merged_from": [self.fingerprint(), other.fingerprint()],
+            "merged_names": [self.name, other.name],
+        }
+        if merged_topic:
+            merged_metadata["topic"] = merged_topic
         return type(self)(
             name=merged_name,
             passages=passages,
             queries=queries,
             qrels=qrels,
-            metadata={
-                "merged_from": [self.fingerprint(), other.fingerprint()],
-                "merged_names": [self.name, other.name],
-            },
+            metadata=merged_metadata,
         )
 
     # ---------- IO ----------

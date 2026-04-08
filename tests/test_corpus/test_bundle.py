@@ -459,7 +459,9 @@ class TestMerge:
         assert merged.n_qrels == 2
         assert "merged_from" in merged.metadata
 
-    def test_overlapping_pids_dedupe_keep_first(self) -> None:
+    def test_merge_raises_on_conflicting_passage_text(self) -> None:
+        # Same `pid` with **different** text on each side used to silently
+        # drop the second; that's a data-loss bug. Fail loud instead.
         a = CorpusBundle(
             name="a",
             passages=pd.DataFrame({"pid": ["p0", "p1"], "text": ["alpha", "bravo"]}),
@@ -472,9 +474,79 @@ class TestMerge:
             queries=pd.DataFrame({"qid": ["q1"], "text": ["y"]}),
             qrels=pd.DataFrame({"qid": ["q1"], "pid": ["p2"], "relevance": [1]}),
         )
+        with pytest.raises(ValueError, match="conflicting passage text"):
+            a.merge(b)
+
+    def test_merge_raises_on_conflicting_query_text(self) -> None:
+        a = CorpusBundle(
+            name="a",
+            passages=pd.DataFrame({"pid": ["p0"], "text": ["x"]}),
+            queries=pd.DataFrame({"qid": ["q0"], "text": ["one"]}),
+            qrels=pd.DataFrame({"qid": ["q0"], "pid": ["p0"], "relevance": [1]}),
+        )
+        b = CorpusBundle(
+            name="b",
+            passages=pd.DataFrame({"pid": ["p0"], "text": ["x"]}),
+            queries=pd.DataFrame({"qid": ["q0"], "text": ["DIFFERENT"]}),
+            qrels=pd.DataFrame({"qid": ["q0"], "pid": ["p0"], "relevance": [1]}),
+        )
+        with pytest.raises(ValueError, match="conflicting query text"):
+            a.merge(b)
+
+    def test_merge_raises_on_conflicting_topic(self) -> None:
+        a = CorpusBundle(
+            name="a",
+            passages=pd.DataFrame({"pid": ["p0"], "text": ["x"]}),
+            queries=pd.DataFrame({"qid": ["q0"], "text": ["one"]}),
+            qrels=pd.DataFrame({"qid": ["q0"], "pid": ["p0"], "relevance": [1]}),
+            metadata={"topic": "medical"},
+        )
+        b = CorpusBundle(
+            name="b",
+            passages=pd.DataFrame({"pid": ["p1"], "text": ["y"]}),
+            queries=pd.DataFrame({"qid": ["q1"], "text": ["two"]}),
+            qrels=pd.DataFrame({"qid": ["q1"], "pid": ["p1"], "relevance": [1]}),
+            metadata={"topic": "legal"},
+        )
+        with pytest.raises(ValueError, match="topic conflict"):
+            a.merge(b)
+
+    def test_merge_topic_one_sided_takes_non_empty(self) -> None:
+        # If only one side carries a topic the merge succeeds and that
+        # topic propagates to the merged bundle's metadata.
+        a = CorpusBundle(
+            name="a",
+            passages=pd.DataFrame({"pid": ["p0"], "text": ["x"]}),
+            queries=pd.DataFrame({"qid": ["q0"], "text": ["one"]}),
+            qrels=pd.DataFrame({"qid": ["q0"], "pid": ["p0"], "relevance": [1]}),
+            metadata={"topic": "medical"},
+        )
+        b = CorpusBundle(
+            name="b",
+            passages=pd.DataFrame({"pid": ["p1"], "text": ["y"]}),
+            queries=pd.DataFrame({"qid": ["q1"], "text": ["two"]}),
+            qrels=pd.DataFrame({"qid": ["q1"], "pid": ["p1"], "relevance": [1]}),
+        )
+        merged = a.merge(b)
+        assert merged.metadata.get("topic") == "medical"
+
+    def test_merge_accepts_identical_passage_text(self) -> None:
+        # Sanity: same pid + same text (and same qid + same text) is the
+        # normal "two slices of the same corpus" case; merge cleanly.
+        a = CorpusBundle(
+            name="a",
+            passages=pd.DataFrame({"pid": ["p0", "p1"], "text": ["alpha", "bravo"]}),
+            queries=pd.DataFrame({"qid": ["q0"], "text": ["one"]}),
+            qrels=pd.DataFrame({"qid": ["q0"], "pid": ["p0"], "relevance": [1]}),
+        )
+        b = CorpusBundle(
+            name="b",
+            passages=pd.DataFrame({"pid": ["p1", "p2"], "text": ["bravo", "charlie"]}),
+            queries=pd.DataFrame({"qid": ["q1"], "text": ["two"]}),
+            qrels=pd.DataFrame({"qid": ["q1"], "pid": ["p2"], "relevance": [1]}),
+        )
         merged = a.merge(b)
         assert merged.n_passages == 3
-        # `p1` text comes from `a` because dedup keeps first.
         p1_text = merged.passages.loc[merged.passages["pid"] == "p1", "text"].iloc[0]
         assert p1_text == "bravo"
 
