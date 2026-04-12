@@ -596,3 +596,27 @@ class TestMerge:
         assert len(lineage) == 2
         assert a.fingerprint() in lineage
         assert b.fingerprint() in lineage
+
+    def test_merge_is_order_invariant(self) -> None:
+        # `a.merge(b).fingerprint() == b.merge(a).fingerprint()` whenever
+        # the two bundles describe equivalent data. Without this, the
+        # fingerprint flips depending on which side called `.merge()`,
+        # breaking cache reuse and disagreeing on lineage between runs.
+        a = CorpusBundle(
+            name="alpha",
+            passages=pd.DataFrame({"pid": ["p0", "p1"], "text": ["one", "two"]}),
+            queries=pd.DataFrame({"qid": ["q0"], "text": ["x"]}),
+            qrels=pd.DataFrame({"qid": ["q0"], "pid": ["p0"], "relevance": [1]}),
+        )
+        b = CorpusBundle(
+            name="bravo",
+            passages=pd.DataFrame({"pid": ["p2", "p3"], "text": ["three", "four"]}),
+            queries=pd.DataFrame({"qid": ["q1"], "text": ["y"]}),
+            qrels=pd.DataFrame({"qid": ["q1"], "pid": ["p2"], "relevance": [1]}),
+        )
+        ab = a.merge(b)
+        ba = b.merge(a)
+        assert ab.name == ba.name
+        assert ab.metadata["merged_from"] == ba.metadata["merged_from"]
+        assert ab.metadata["merged_names"] == ba.metadata["merged_names"]
+        assert ab.fingerprint() == ba.fingerprint()

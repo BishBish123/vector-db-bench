@@ -369,10 +369,17 @@ class CorpusBundle:
             )
         merged_topic = self_topic or other_topic
 
-        merged_name = name if name is not None else f"{self.name}+{other.name}"
+        # Default name + lineage are both order-invariant: the alphabetically
+        # sorted join means `a.merge(b).name == b.merge(a).name`, and storing
+        # lineage as a sorted list of `(name, fingerprint)` pairs means the
+        # merged bundle's metadata (and therefore its fingerprint) does not
+        # depend on which side called `.merge()`.
+        merged_name = name if name is not None else "+".join(sorted([self.name, other.name]))
+        sources = sorted([(self.name, self.fingerprint()), (other.name, other.fingerprint())])
         merged_metadata: dict[str, object] = {
-            "merged_from": [self.fingerprint(), other.fingerprint()],
-            "merged_names": [self.name, other.name],
+            "merged_from": [fp for _, fp in sources],
+            "merged_names": [n for n, _ in sources],
+            "merged_sources": [list(pair) for pair in sources],
         }
         if merged_topic:
             merged_metadata["topic"] = merged_topic
