@@ -868,7 +868,21 @@ def _build_summary(
     lat = aggregate(latencies_ms)
     rec = aggregate(recalls)
     ndcg = aggregate(ndcgs)
-    qps = 1000.0 / lat["mean"] if lat["mean"] and not np.isnan(lat["mean"]) else 0.0
+    # `lat["mean"]` may be exactly 0.0 for in-memory / exact adapters that
+    # complete in sub-microsecond time; the previous truthiness guard
+    # (`if lat["mean"]`) treated 0.0 as "no data" and surfaced
+    # ``qps_estimate=0.0`` for adapters that should report effectively
+    # infinite throughput. Now we discriminate "no data" from
+    # "instantaneous": a missing mean (None / NaN / negative) maps to
+    # ``qps=0.0`` (existing semantics), but a true 0.0 mean produces
+    # ``inf`` so a downstream comparison plot doesn't anchor on a
+    # spurious zero.
+    if lat["mean"] is None or np.isnan(lat["mean"]) or lat["mean"] < 0:
+        qps = 0.0
+    elif lat["mean"] == 0.0:
+        qps = float("inf")
+    else:
+        qps = 1000.0 / lat["mean"]
     p99 = (
         float(np.percentile(np.fromiter(latencies_ms, dtype=np.float64), 99))
         if latencies_ms

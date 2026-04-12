@@ -727,3 +727,59 @@ class TestBenchSpecProfile:
         assert spec.repeats == 2
         spec_warm = BenchSpec(adapter=_MemAdapter(), profile="warm", repeats=7)
         assert spec_warm.repeats == 7
+
+
+# ---------------------------------------------------------------------------
+# qps_estimate edge-case: zero-latency must not be reported as zero throughput
+# ---------------------------------------------------------------------------
+
+
+class TestQpsEstimateZeroLatency:
+    """``_build_summary`` must distinguish "instantaneous" from "no data".
+
+    The earlier guard was ``if lat["mean"] and not np.isnan(...)`` which
+    is falsy for ``0.0``. In-memory / exact-NN adapters that complete a
+    query in sub-microsecond time then surfaced ``qps_estimate=0.0``,
+    pinning the comparison plot at the bottom of the y-axis instead of
+    showing them as effectively-infinite throughput. The Round-5 fix
+    splits the cases: missing/NaN/negative → 0.0, exactly 0.0 → inf,
+    positive → 1000/lat.
+    """
+
+    @staticmethod
+    def _summary(latencies_ms: list[float]):
+        from vdbbench.adapters.base import IndexStats, IngestStats
+        from vdbbench.bench.runner import BenchSpec, _build_summary
+
+        spec = BenchSpec(adapter=_MemAdapter(), k=1, repeats=1)
+        encoded = _toy_encoded()
+        ingest = IngestStats(n_vectors=encoded.bundle.n_passages, elapsed_s=0.001)
+        index = IndexStats(elapsed_s=0.001, bytes_disk=0)
+        return _build_summary(
+            spec,
+            encoded,
+            ingest,
+            index,
+            recalls=[1.0],
+            ndcgs=[1.0],
+            latencies_ms=latencies_ms,
+        )
+
+    def test_zero_latency_yields_inf_qps(self) -> None:
+        # 0.0 mean → instantaneous → infinite throughput, NOT zero.
+        s = self._summary([0.0, 0.0])
+        assert s.qps_estimate == float("inf"), (
+            f"expected inf qps for 0ms latency adapter; got {s.qps_estimate}"
+        )
+
+    def test_empty_latency_yields_zero_qps(self) -> None:
+        # No data → aggregate returns NaN mean → qps still 0.0 (preserve
+        # the previous semantics for the "no data" case so callers that
+        # plot zero get the same chart they did before the fix).
+        s = self._summary([])
+        assert s.qps_estimate == 0.0
+
+    def test_positive_latency_yields_inverse_qps(self) -> None:
+        # 1ms mean → 1000 qps. Sanity check the happy path didn't regress.
+        s = self._summary([1.0, 1.0, 1.0])
+        assert s.qps_estimate == pytest.approx(1000.0)
