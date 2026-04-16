@@ -92,3 +92,39 @@ class TestQdrantIngestSearch:
         adapter.ingest(ids, vecs)
         result = adapter.search(vecs[1], k=1)
         assert result == ["xyz-7"]
+
+
+class TestQdrantStorageKnobs:
+    """Pin the on-disk knobs to the right Qdrant subsystem.
+
+    Earlier revisions silently routed `on_disk_payload` into
+    `VectorParams.on_disk`, which controls vector storage, not payload
+    storage — opposite of the documented behavior. This test asserts the
+    server-side config matches what the kwarg name promises.
+    """
+
+    def test_on_disk_payload_lands_on_collection_config(
+        self, adapter: QdrantAdapter
+    ) -> None:
+        adapter.setup(dim=4, params={"on_disk_payload": True})
+        info = adapter._connect().get_collection(collection_name=adapter._collection)
+        # `params.on_disk_payload` is the canonical accessor since
+        # qdrant-client 1.7+; older clients put it directly on `config`.
+        cfg = getattr(info, "config", None)
+        params = getattr(cfg, "params", None) if cfg is not None else None
+        on_disk_payload = getattr(params, "on_disk_payload", None)
+        assert on_disk_payload is True, (
+            f"on_disk_payload should propagate to the collection config, got {on_disk_payload!r}"
+        )
+
+    def test_on_disk_vectors_lands_on_vector_params(self, adapter: QdrantAdapter) -> None:
+        adapter.setup(dim=4, params={"on_disk_vectors": True})
+        info = adapter._connect().get_collection(collection_name=adapter._collection)
+        cfg = getattr(info, "config", None)
+        vec_cfg = getattr(getattr(cfg, "params", None), "vectors", None)
+        # Newer client wraps vectors in a `VectorParams` directly; the
+        # `on_disk` attribute is what we set.
+        on_disk = getattr(vec_cfg, "on_disk", None)
+        assert on_disk is True, (
+            f"on_disk_vectors should propagate to VectorParams.on_disk, got {on_disk!r}"
+        )

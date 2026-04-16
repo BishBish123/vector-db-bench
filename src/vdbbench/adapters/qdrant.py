@@ -8,12 +8,23 @@ Supported `params` keys:
         "m": int,                # HNSW M (default: 16)
         "ef_construction": int,  # HNSW ef_construction (default: 100)
         "ef_search": int,        # HNSW search-time ef (default: 64)
-        "on_disk_payload": bool, # default: False
+        "on_disk_payload": bool, # store the per-point PAYLOAD on disk
+                                 # (collection-level setting). Default: False.
+        "on_disk_vectors": bool, # store the dense VECTOR matrix on disk
+                                 # (per-vector-config setting). Default: False.
         "payload_indexed_fields": list[str],  # fields to index for filter+ANN
     }
 
 Qdrant always uses HNSW for vector search; passing `index="none"` is
 equivalent to a tiny `m` and is not exposed here on purpose.
+
+Note that `on_disk_payload` and `on_disk_vectors` are different
+subsystems in Qdrant: the former is the top-level collection setting
+that controls payload storage, the latter is a `VectorParams` setting
+that controls vector storage. Earlier revisions of this adapter wired
+the `on_disk_payload` knob into `VectorParams.on_disk`, which silently
+moved vectors to disk while leaving payload in RAM — opposite of what
+the name implied.
 
 `payload_indexed_fields` controls payload schema for hybrid filter+ANN
 queries — Qdrant requires the field be indexed with a known type before
@@ -82,6 +93,12 @@ class QdrantAdapter:
         # explicit delete-then-create so this works across releases.
         with contextlib.suppress(Exception):
             client.delete_collection(collection_name=self._collection)
+        # `on_disk_payload` is a collection-level kwarg controlling payload
+        # storage. `on_disk` on `VectorParams` controls *vector* storage —
+        # a separate subsystem, exposed here as `on_disk_vectors` so the
+        # two are not conflated.
+        on_disk_payload = bool(params.get("on_disk_payload", False))
+        on_disk_vectors = bool(params.get("on_disk_vectors", False))
         client.create_collection(
             collection_name=self._collection,
             vectors_config=models.VectorParams(
@@ -91,8 +108,9 @@ class QdrantAdapter:
                     m=int(cast(int | str, params.get("m", 16))),
                     ef_construct=int(cast(int | str, params.get("ef_construction", 100))),
                 ),
-                on_disk=bool(params.get("on_disk_payload", False)),
+                on_disk=on_disk_vectors,
             ),
+            on_disk_payload=on_disk_payload,
         )
 
         # Pre-create payload indexes so filter+ANN queries don't fall back
