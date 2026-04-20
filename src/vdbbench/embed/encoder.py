@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol, runtime_checkable
@@ -214,7 +215,19 @@ class EncodedBundle:
 
 
 def load_encoded_bundle(root: str | Path) -> EncodedBundle:
-    """Load an `EncodedBundle` previously written by `save()`."""
+    """Load an `EncodedBundle` previously written by `save()`.
+
+    Two fingerprint checks run:
+
+    * `bundle_fingerprint` is the *hard* check — saving rejected stale
+      bundles, so a mismatch here means the on-disk `corpus/` directory was
+      swapped under us, and any returned vectors would be paired with the
+      wrong ids. We refuse to load.
+    * `encoded_at_fingerprint` is the *soft* check — it captures the bundle
+      fingerprint at the moment encoding ran. If only this drifts (somebody
+      hand-edited `manifest.json` or replayed a partially-stale write), we
+      warn so callers can act on the suspicion without a load failure.
+    """
     root_path = Path(root)
     bundle = CorpusBundle.load(root_path / "corpus")
     manifest = json.loads((root_path / "manifest.json").read_text())
@@ -225,6 +238,17 @@ def load_encoded_bundle(root: str | Path) -> EncodedBundle:
             "encoded bundle's stored corpus fingerprint does not match the "
             "loaded corpus — somebody swapped `corpus/` under the saved "
             "vectors. Refusing to load (would silently mis-pair embeddings)."
+        )
+
+    encoded_at_fp = manifest.get("encoded_at_fingerprint")
+    current_fp = bundle.fingerprint()
+    if encoded_at_fp and encoded_at_fp != current_fp:
+        warnings.warn(
+            f"Encoded vectors were produced against bundle fingerprint "
+            f"{encoded_at_fp} but the current bundle is {current_fp}; the "
+            f"corpus has changed since encoding. Re-run encode_corpus() "
+            f"before trusting these vectors.",
+            stacklevel=2,
         )
 
     expected_dim = int(manifest["dim"])

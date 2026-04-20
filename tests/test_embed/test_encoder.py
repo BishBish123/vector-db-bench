@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import numpy as np
@@ -252,6 +253,25 @@ class TestSaveLoad:
         swapped.save(out / "corpus")
 
         with pytest.raises(ValueError, match="corpus fingerprint does not match"):
+            load_encoded_bundle(out)
+
+    def test_load_warns_on_encoded_at_fingerprint_drift(self, tmp_path: Path) -> None:
+        """If the manifest's encoded-at fingerprint disagrees with the loaded
+        corpus we warn — distinct from the hard `bundle_fingerprint` check
+        because the manifest may have been hand-edited or partially-stale.
+        """
+        bundle = _toy_bundle()
+        encoded = encode_corpus(bundle, FakeEncoder(dim=8))
+        out = encoded.save(tmp_path / "encoded")
+
+        manifest_path = out / "manifest.json"
+        manifest = json.loads(manifest_path.read_text())
+        # Drift only the soft check — leave `bundle_fingerprint` consistent
+        # so the hard check passes and we exercise the warning path.
+        manifest["encoded_at_fingerprint"] = "deadbeef" * 4
+        manifest_path.write_text(json.dumps(manifest))
+
+        with pytest.warns(UserWarning, match="corpus has changed since encoding"):
             load_encoded_bundle(out)
 
     def test_save_does_not_materialize_full_matrix_as_python(self, tmp_path: Path) -> None:
