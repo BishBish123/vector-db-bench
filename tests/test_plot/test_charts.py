@@ -80,10 +80,16 @@ class TestCharts:
         assert png.exists() and svg.exists()
 
     def test_plot_all_writes_every_chart(self, tmp_path: Path) -> None:
+        # Toy summary doesn't include the default `chroma` baseline. That's
+        # a legit case in real data too (chroma not in the run), and
+        # `plot_all` is documented to degrade by warning + picking
+        # alphabetically. Pin that path so the test surfaces a regression
+        # if the fallback ever flips back to silent.
         df = _toy_summary()
         path = tmp_path / "summary.parquet"
         df.to_parquet(path, index=False)
-        result = plot_all(path, tmp_path / "out")
+        with pytest.warns(UserWarning, match="alphabetically-first"):
+            result = plot_all(path, tmp_path / "out")
         for name in ("pareto", "recall", "latency", "ingest", "index_disk", "speedup"):
             png, svg = result[name]
             assert png.exists() and svg.exists()
@@ -98,8 +104,22 @@ class TestCharts:
         png, svg = plot_speedup_vs_baseline(_toy_summary(), tmp_path, baseline_db="pgvector")
         assert png.exists() and svg.exists()
 
-    def test_speedup_chart_falls_back_when_baseline_missing(self, tmp_path: Path) -> None:
-        """If chroma isn't in the run, the chart still gets produced."""
+    def test_speedup_chart_raises_when_named_baseline_missing(
+        self, tmp_path: Path
+    ) -> None:
+        """If a baseline is explicitly named but not present in the data,
+        raise — silently substituting the alphabetically-first DB used to
+        let typos through and produce a chart titled against a DB that
+        wasn't even in the run.
+        """
         df = _toy_summary()  # only pgvector + qdrant
-        png, svg = plot_speedup_vs_baseline(df, tmp_path, baseline_db="chroma")
+        with pytest.raises(ValueError, match="not found in summary"):
+            plot_speedup_vs_baseline(df, tmp_path, baseline_db="chroma")
+
+    def test_speedup_chart_warns_when_baseline_is_none(self, tmp_path: Path) -> None:
+        """`baseline_db=None` is the explicit "pick something for me" path,
+        so we warn (don't raise) and still emit a chart."""
+        df = _toy_summary()
+        with pytest.warns(UserWarning, match="alphabetically-first"):
+            png, svg = plot_speedup_vs_baseline(df, tmp_path, baseline_db=None)
         assert png.exists() and svg.exists()

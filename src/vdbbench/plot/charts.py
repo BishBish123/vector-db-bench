@@ -15,6 +15,7 @@ so re-running `make plots` after a bench is cheap and deterministic.
 
 from __future__ import annotations
 
+import warnings
 from pathlib import Path
 
 import matplotlib
@@ -115,19 +116,36 @@ def plot_speedup_vs_baseline(
     summary: pd.DataFrame,
     out: str | Path,
     *,
-    baseline_db: str = "chroma",
+    baseline_db: str | None = "chroma",
 ) -> tuple[Path, Path]:
     """Per-DB speedup over `baseline_db` p95 latency.
 
     Speedup = baseline_p95 / db_p95. >1 means faster than baseline. The
     baseline itself is shown as a 1.0 reference bar so the chart still
     makes sense when chroma isn't in the run.
+
+    Baseline resolution:
+
+    * If `baseline_db` is given and present, use it.
+    * If it is given but missing from the summary, raise — silently
+      falling back to "alphabetically first" used to mask reviewer typos
+      and produce a chart titled with a DB that wasn't actually used.
+    * If `baseline_db` is `None`, warn and pick the alphabetically-first
+      DB so the call still produces a chart for ad-hoc plotting.
     """
     out_path = _ensure_outdir(out)
-    if baseline_db not in summary["db"].values:
-        # Baseline not in the run — fall back to picking the first DB by
-        # name (deterministic) so the chart is still informative.
-        baseline_db = sorted(summary["db"].unique())[0]
+    available = sorted(set(summary["db"]))
+    if baseline_db is not None and baseline_db not in summary["db"].values:
+        raise ValueError(
+            f"baseline_db={baseline_db!r} not found in summary; available: {available}"
+        )
+    if baseline_db is None:
+        baseline_db = available[0]
+        warnings.warn(
+            f"plot_speedup_vs_baseline: baseline_db not given; "
+            f"defaulting to alphabetically-first DB {baseline_db!r}",
+            stacklevel=2,
+        )
     baseline_lat = float(summary[summary["db"] == baseline_db]["latency_ms_p95"].mean())
 
     fig, ax = plt.subplots(figsize=(10, 6))
@@ -148,10 +166,21 @@ def plot_speedup_vs_baseline(
 
 
 def plot_all(summary_path: str | Path, out: str | Path) -> dict[str, tuple[Path, Path]]:
-    """Read `summary.parquet` and emit every standard chart into `out/`."""
+    """Read `summary.parquet` and emit every standard chart into `out/`.
+
+    `chroma` is the preferred speedup baseline (it's the simplest in-memory
+    adapter, so its p95 is a reasonable "no tuning" floor). If it isn't in
+    the run, fall back to `None` so `plot_speedup_vs_baseline` warns and
+    picks the alphabetically-first DB rather than raising — `plot_all` is
+    the "produce everything you can" entry point and should degrade
+    gracefully.
+    """
     summary = pd.read_parquet(summary_path)
     if summary.empty:
         raise ValueError(f"summary at {summary_path} is empty")
+    speedup_baseline: str | None = (
+        "chroma" if "chroma" in summary["db"].values else None
+    )
     return {
         "pareto": plot_pareto_frontier(summary, out),
         "recall": plot_axis_bars(
@@ -189,5 +218,5 @@ def plot_all(summary_path: str | Path, out: str | Path) -> dict[str, tuple[Path,
             name="index_disk",
             log=True,
         ),
-        "speedup": plot_speedup_vs_baseline(summary, out),
+        "speedup": plot_speedup_vs_baseline(summary, out, baseline_db=speedup_baseline),
     }
