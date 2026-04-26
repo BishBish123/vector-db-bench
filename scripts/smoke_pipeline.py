@@ -1,8 +1,11 @@
 """End-to-end synthetic smoke run for CI.
 
-Exercises corpus → encode → bench → plot offline (no Postgres, no Qdrant,
-no model download). Uses the reference brute-force in-memory adapter so
-the script runs on every platform in a few seconds.
+Exercises corpus → encode → save/load → bench → plot offline (no
+Postgres, no Qdrant, no model download). The encode step goes through
+the deterministic in-package `FakeEncoder` so the script genuinely
+covers `encode_corpus()` and the on-disk round-trip in addition to the
+bench + plot wiring. Uses the reference brute-force in-memory adapter
+so the script runs on every platform in a few seconds.
 
 Invoke as:
 
@@ -19,7 +22,7 @@ import numpy as np
 from vdbbench.adapters.base import IndexStats, IngestStats
 from vdbbench.bench.runner import BenchSpec, run_bench
 from vdbbench.corpus.synthetic import SyntheticConfig, generate_synthetic
-from vdbbench.embed.encoder import EncodedBundle
+from vdbbench.embed.encoder import FakeEncoder, encode_corpus, load_encoded_bundle
 from vdbbench.plot.charts import plot_all
 
 
@@ -70,6 +73,11 @@ def main() -> None:
 
     args.out.mkdir(parents=True, exist_ok=True)
 
+    # 1) Generate the bundle. We only use `synth.bundle` — the synthetic
+    #    vectors are discarded because the smoke run encodes via
+    #    `FakeEncoder` to exercise the real encoding path. (Consequence:
+    #    smoke recall numbers are not meaningful — this script verifies
+    #    that the pipeline *runs*, not that it scores well.)
     synth = generate_synthetic(
         SyntheticConfig(
             n_passages=args.n_passages,
@@ -77,14 +85,26 @@ def main() -> None:
             dim=args.dim,
         )
     )
-    encoded = EncodedBundle(
-        bundle=synth.bundle,
-        passage_vectors=synth.passage_vectors,
-        query_vectors=synth.query_vectors,
-        encoder_name="synthetic",
-    )
+    bundle = synth.bundle
+
+    # 2) Encode the bundle through the production code path.
+    encoder = FakeEncoder(dim=min(args.dim, 64))
+    encoded = encode_corpus(bundle, encoder, batch_size=64)
+
+    # 3) Save + reload to confirm the on-disk round-trip is intact. Bench
+    #    runs against the reloaded bundle so the smoke covers the full
+    #    "what users actually run" sequence, not just the in-memory path.
+    encoded_root = args.out / "encoded"
+    encoded.save(encoded_root)
+    reloaded = load_encoded_bundle(encoded_root)
+    if reloaded.bundle.fingerprint() != encoded.bundle.fingerprint():
+        raise SystemExit("smoke: encoded round-trip changed bundle fingerprint")
+    if not np.array_equal(reloaded.passage_vectors, encoded.passage_vectors):
+        raise SystemExit("smoke: encoded round-trip changed passage vectors")
+
+    # 4) Bench + plot.
     spec = BenchSpec(adapter=_MemAdapter(), k=5, profile="warm")
-    result = run_bench(encoded, [spec])
+    result = run_bench(reloaded, [spec])
     result.save(args.out)
     plot_all(args.out / "summary.parquet", args.out / "charts")
 
