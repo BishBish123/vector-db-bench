@@ -139,6 +139,11 @@ class QdrantAdapter:
             client.delete_collection(collection_name=self._collection)
         self._id_to_int.clear()
         self._int_to_id.clear()
+        # Match the pgvector adapter: nulling ``_dim`` here is what makes
+        # ``ingest()`` raise its "called before setup()" guard if a caller
+        # accidentally re-uses this adapter after teardown. Without the
+        # reset we silently issued upserts against a deleted collection.
+        self._dim = None
 
     # ---------- ingest ----------
 
