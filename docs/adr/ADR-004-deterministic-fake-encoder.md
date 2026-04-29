@@ -44,9 +44,13 @@ smoke pipeline script `scripts/smoke_pipeline.py` (which now drives a
 full `corpus → encode → save → load → bench → plot` round-trip against
 an in-memory adapter, in seconds, with no torch and no network).
 
-* **Unit tests.** Every test in `tests/test_embed`, `tests/test_bench`,
-  and the adapter contract test uses it. No model download, no torch
-  dependency, no network.
+* **Unit tests.** `tests/test_embed` exercises `FakeEncoder` directly;
+  `tests/test_bench` and the adapter integration tests rely on
+  pre-encoded synthetic vectors from the corpus generator (which is
+  also deterministic). The adapter contract test in
+  `tests/test_adapters/test_contract.py` uses synthetic vectors rather
+  than `FakeEncoder` because the contract under test is the adapter,
+  not the encoder. No model download, no torch dependency, no network.
 * **Smoke runs in CI.** `scripts/smoke_pipeline.py` runs end-to-end
   against an in-memory adapter using only `FakeEncoder`, in seconds.
 * **Adapter regression spotting.** Because the encoder is text-deterministic,
