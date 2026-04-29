@@ -128,3 +128,25 @@ class TestQdrantStorageKnobs:
         assert on_disk is True, (
             f"on_disk_vectors should propagate to VectorParams.on_disk, got {on_disk!r}"
         )
+
+    def test_payload_index_cost_lands_in_build_index_elapsed(
+        self, adapter: QdrantAdapter
+    ) -> None:
+        """Payload indexes used to be created in `setup()` before timing
+        started, so cold-start filtered-query setup cost was reported as
+        zero. They now live in `build_index()` so their cost shows up in
+        the reported `elapsed_s`.
+        """
+        adapter.setup(
+            dim=4,
+            params={"payload_indexed_fields": ["pid", "tag"]},
+        )
+        ids = ["p0", "p1", "p2"]
+        adapter.ingest(ids, _random_vectors(3, 4))
+        stats = adapter.build_index()
+        # Real network round-trips for two payload indexes are well above
+        # 0.0 even on a localhost Qdrant; the contract is "we don't lie
+        # about index time being free".
+        assert stats.elapsed_s > 0.0, (
+            f"build_index() should account for payload-index creation; got {stats.elapsed_s}"
+        )

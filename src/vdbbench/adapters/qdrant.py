@@ -113,19 +113,6 @@ class QdrantAdapter:
             on_disk_payload=on_disk_payload,
         )
 
-        # Pre-create payload indexes so filter+ANN queries don't fall back
-        # to a linear scan of `payload`. Qdrant requires the schema to be
-        # declared up front. We default each indexed field to `keyword` —
-        # the right type for the harness's `pid` and any string tag.
-        indexed_fields = params.get("payload_indexed_fields") or []
-        if isinstance(indexed_fields, list | tuple):
-            for field_name in indexed_fields:
-                client.create_payload_index(
-                    collection_name=self._collection,
-                    field_name=str(field_name),
-                    field_schema=models.PayloadSchemaType.KEYWORD,
-                )
-
         self._dim = dim
         self._params = dict(params)
         self._distance = _DISTANCE_MAP[metric]
@@ -187,15 +174,33 @@ class QdrantAdapter:
         return IngestStats(n_vectors=len(ids), elapsed_s=elapsed)
 
     def build_index(self) -> IndexStats:
-        # Qdrant builds the HNSW index incrementally during ingest; nothing
-        # to do here beyond reporting the on-disk footprint of the collection.
+        # Qdrant builds the HNSW index incrementally during ingest, so the
+        # vector index itself is "free" by this point. Payload indexes,
+        # though, *do* take real time on cold filtered queries — and the
+        # adapter used to create them in `setup()` before any timing
+        # started, hiding that cost. Build them here and surface the
+        # elapsed seconds via `elapsed_s` so cold-start filtered ANN cost
+        # shows up in the reported "index time".
         if self._dim is None:
             raise RuntimeError("build_index() called before setup()")
+        from qdrant_client import models  # noqa: PLC0415
+
         client = self._connect()
+        indexed_fields = self._params.get("payload_indexed_fields") or []
+        elapsed = 0.0
+        if isinstance(indexed_fields, list | tuple) and indexed_fields:
+            start = time.perf_counter()
+            for field_name in indexed_fields:
+                client.create_payload_index(
+                    collection_name=self._collection,
+                    field_name=str(field_name),
+                    field_schema=models.PayloadSchemaType.KEYWORD,
+                )
+            elapsed = time.perf_counter() - start
         info = client.get_collection(collection_name=self._collection)
         # Newer versions expose `disk_data_size`; fall back to 0 for unknown.
         bytes_disk = int(getattr(info, "disk_data_size", None) or 0)
-        return IndexStats(elapsed_s=0.0, bytes_disk=bytes_disk)
+        return IndexStats(elapsed_s=elapsed, bytes_disk=bytes_disk)
 
     # ---------- search ----------
 
