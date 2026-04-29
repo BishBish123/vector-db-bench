@@ -39,12 +39,16 @@ without poking at the test tree.
 
 ## Use cases
 
+`FakeEncoder` is exercised by `tests/test_embed/test_encoder.py` and the
+smoke pipeline script `scripts/smoke_pipeline.py` (which now drives a
+full `corpus → encode → save → load → bench → plot` round-trip against
+an in-memory adapter, in seconds, with no torch and no network).
+
 * **Unit tests.** Every test in `tests/test_embed`, `tests/test_bench`,
   and the adapter contract test uses it. No model download, no torch
   dependency, no network.
-* **Smoke runs in CI.** A future smoke-test job can run
-  `corpus → encode → bench → plot` end-to-end against an in-memory
-  adapter using only `FakeEncoder`, in seconds.
+* **Smoke runs in CI.** `scripts/smoke_pipeline.py` runs end-to-end
+  against an in-memory adapter using only `FakeEncoder`, in seconds.
 * **Adapter regression spotting.** Because the encoder is text-deterministic,
   the gold pid for a given query is `argmax(cos(query_vec, *passage_vecs))`
   computed once and pinned. An adapter that mis-orders results fails

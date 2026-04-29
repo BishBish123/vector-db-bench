@@ -56,8 +56,9 @@ is now in RAM. The right index when memory is the binding constraint.
 * Adapter contract test (`tests/test_adapters/test_contract.py`) does
   not parameterize over index family because the contract is "every
   adapter responds to the lifecycle the same way", not "every adapter
-  hits the same recall floor". Per-index recall floors are checked by
-  the integration tests.
+  hits the same recall floor". Integration tests verify membership in
+  top-k under a small fixture corpus; real recall@k floors are
+  evaluated only via the bench harness on real data.
 * IVFFLAT is pgvector-only and IVF-PQ is LanceDB-only because that's
   what those backends ship; trying to force a single index family
   across all adapters would erase the comparison this ADR exists to
