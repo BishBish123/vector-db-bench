@@ -27,6 +27,19 @@ def _ensure_columns(df: pd.DataFrame, expected: tuple[str, ...], name: str) -> p
     return df.loc[:, list(expected)].reset_index(drop=True)
 
 
+def _validate_text(series: pd.Series, *, label: str, allow_blank: bool) -> None:
+    """Reject null and (by default) blank-only text in a passage/query column."""
+    if series.isna().any():
+        raise ValueError(f"{label} contains nulls")
+    # `str.strip() == ""` covers `""` and any pure-whitespace string.
+    # Cast through `.astype(str)` first because pandas may hand us an
+    # `object` / `string` column with mixed types.
+    if not allow_blank and series.astype(str).str.strip().eq("").any():
+        raise ValueError(
+            f"{label} contains blank/whitespace-only rows; pass allow_blank=True to accept them"
+        )
+
+
 @dataclass(frozen=True, eq=False)
 class CorpusBundle:
     """A passage corpus, the queries against it, and the relevance judgements.
@@ -42,6 +55,12 @@ class CorpusBundle:
     queries: pd.DataFrame
     qrels: pd.DataFrame
     metadata: dict[str, object] = field(default_factory=dict)
+    # When True, blank-only (`""`/whitespace) passage and query text is
+    # accepted. Defaults to False because `encode_corpus()` would otherwise
+    # silently produce embeddings for empty strings (every blank text would
+    # collapse to the same vector for a deterministic encoder, or to NaN for
+    # a model that pools over zero tokens).
+    allow_blank: bool = field(default=False, compare=False)
     # Filled in __post_init__ from `fingerprint()` after validation. Used by
     # __eq__/__hash__ so identity stays stable across in-place mutations of
     # the underlying frames or metadata.
@@ -68,6 +87,16 @@ class CorpusBundle:
             raise ValueError("qrels.pid/qid contains nulls")
         if self.qrels["relevance"].isna().any():
             raise ValueError("qrels.relevance contains nulls")
+
+        # Reject null/blank text — `encode_corpus()` calls `.astype(str)`
+        # on the text column, which would otherwise stringify `NaN`/`<NA>`
+        # into the literal strings `"nan"` / `"<NA>"` and produce bogus
+        # embeddings rather than failing loud. Blank-only text (pure
+        # whitespace) is also rejected by default for the same reason;
+        # flip `allow_blank=True` for loaders that legitimately ship empty
+        # strings (rare).
+        _validate_text(self.passages["text"], label="passages.text", allow_blank=self.allow_blank)
+        _validate_text(self.queries["text"], label="queries.text", allow_blank=self.allow_blank)
 
         # Force canonical dtypes — loaders may pass int ids (MS-MARCO) or
         # mixed types from joins. Without this, downstream `.isin()` filters
@@ -258,6 +287,7 @@ class CorpusBundle:
             queries=new_queries,
             qrels=new_qrels,
             metadata=new_meta,
+            allow_blank=self.allow_blank,
         )
 
     # ---------- transformations ----------
@@ -295,6 +325,7 @@ class CorpusBundle:
             queries=sliced.queries,
             qrels=sliced.qrels,
             metadata=new_meta,
+            allow_blank=self.allow_blank,
         )
 
     def merge(self, other: Self, name: str | None = None) -> Self:
@@ -389,6 +420,7 @@ class CorpusBundle:
             queries=queries,
             qrels=qrels,
             metadata=merged_metadata,
+            allow_blank=self.allow_blank or other.allow_blank,
         )
 
     # ---------- IO ----------

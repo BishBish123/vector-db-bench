@@ -103,9 +103,7 @@ class TestQdrantStorageKnobs:
     server-side config matches what the kwarg name promises.
     """
 
-    def test_on_disk_payload_lands_on_collection_config(
-        self, adapter: QdrantAdapter
-    ) -> None:
+    def test_on_disk_payload_lands_on_collection_config(self, adapter: QdrantAdapter) -> None:
         adapter.setup(dim=4, params={"on_disk_payload": True})
         info = adapter._connect().get_collection(collection_name=adapter._collection)
         # `params.on_disk_payload` is the canonical accessor since
@@ -129,9 +127,7 @@ class TestQdrantStorageKnobs:
             f"on_disk_vectors should propagate to VectorParams.on_disk, got {on_disk!r}"
         )
 
-    def test_payload_index_cost_lands_in_build_index_elapsed(
-        self, adapter: QdrantAdapter
-    ) -> None:
+    def test_payload_index_cost_lands_in_build_index_elapsed(self, adapter: QdrantAdapter) -> None:
         """Payload indexes used to be created in `setup()` before timing
         started, so cold-start filtered-query setup cost was reported as
         zero. They now live in `build_index()` so their cost shows up in

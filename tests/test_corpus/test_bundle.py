@@ -109,6 +109,60 @@ class TestValidation:
                 qrels=pd.DataFrame({"qid": ["GHOST"], "pid": ["p0"], "relevance": [1]}),
             )
 
+    def test_null_passage_text_rejected(self) -> None:
+        # `encode_corpus()` does `.astype(str)` on the text column, which
+        # would produce the literal string "nan" for null entries. Reject
+        # before any embedding is computed so the failure is loud.
+        with pytest.raises(ValueError, match=r"passages\.text.*null"):
+            CorpusBundle(
+                name="bad",
+                passages=pd.DataFrame({"pid": ["p0"], "text": [pd.NA]}, dtype="object"),
+                queries=pd.DataFrame({"qid": ["q0"], "text": ["x"]}),
+                qrels=pd.DataFrame({"qid": ["q0"], "pid": ["p0"], "relevance": [1]}),
+            )
+
+    def test_null_query_text_rejected(self) -> None:
+        with pytest.raises(ValueError, match=r"queries\.text.*null"):
+            CorpusBundle(
+                name="bad",
+                passages=pd.DataFrame({"pid": ["p0"], "text": ["a"]}),
+                queries=pd.DataFrame({"qid": ["q0"], "text": [pd.NA]}, dtype="object"),
+                qrels=pd.DataFrame({"qid": ["q0"], "pid": ["p0"], "relevance": [1]}),
+            )
+
+    def test_blank_passage_text_rejected_by_default(self) -> None:
+        # Blank/whitespace-only text would collapse every blank passage to
+        # the same vector for a deterministic encoder; reject by default.
+        with pytest.raises(ValueError, match=r"passages\.text.*blank"):
+            CorpusBundle(
+                name="bad",
+                passages=pd.DataFrame({"pid": ["p0", "p1"], "text": ["a", "   "]}),
+                queries=pd.DataFrame({"qid": ["q0"], "text": ["x"]}),
+                qrels=pd.DataFrame({"qid": ["q0"], "pid": ["p0"], "relevance": [1]}),
+            )
+
+    def test_blank_query_text_rejected_by_default(self) -> None:
+        with pytest.raises(ValueError, match=r"queries\.text.*blank"):
+            CorpusBundle(
+                name="bad",
+                passages=pd.DataFrame({"pid": ["p0"], "text": ["a"]}),
+                queries=pd.DataFrame({"qid": ["q0", "q1"], "text": ["x", ""]}),
+                qrels=pd.DataFrame({"qid": ["q0"], "pid": ["p0"], "relevance": [1]}),
+            )
+
+    def test_blank_text_allowed_with_opt_in(self) -> None:
+        # `allow_blank=True` is the escape hatch for loaders that legitimately
+        # ship empty strings — synthetic placeholder rows, control corpora.
+        bundle = CorpusBundle(
+            name="opt-in",
+            passages=pd.DataFrame({"pid": ["p0", "p1"], "text": ["a", ""]}),
+            queries=pd.DataFrame({"qid": ["q0", "q1"], "text": ["x", "  "]}),
+            qrels=pd.DataFrame({"qid": ["q0"], "pid": ["p0"], "relevance": [1]}),
+            allow_blank=True,
+        )
+        assert bundle.n_passages == 2
+        assert bundle.n_queries == 2
+
 
 class TestNormalization:
     def test_integer_ids_are_coerced_to_strings(self) -> None:
@@ -188,18 +242,28 @@ class TestFingerprint:
         assert a.fingerprint() != b.fingerprint()
 
     def test_null_text_distinct_from_empty_text(self) -> None:
-        """Null text and empty-string text must hash differently."""
+        """Null text and empty-string text must hash differently.
+
+        Both bundles use ``allow_blank=True`` so the construction validators
+        permit empty / null text — this test is about the hash invariant.
+        """
         a = CorpusBundle(
             name="t",
             passages=pd.DataFrame({"pid": ["p0"], "text": [""]}),
             queries=pd.DataFrame({"qid": ["q0"], "text": ["x"]}),
             qrels=pd.DataFrame({"qid": ["q0"], "pid": ["p0"], "relevance": [1]}),
+            allow_blank=True,
         )
+        # Pure null `text` is rejected outright (null text would silently
+        # stringify to "nan"); to keep this test exercising the hash
+        # behavior, fingerprint two bundles with `allow_blank=True` and
+        # explicitly-different empty strings via the metadata field.
         b = CorpusBundle(
             name="t",
-            passages=pd.DataFrame({"pid": ["p0"], "text": [pd.NA]}, dtype="object"),
+            passages=pd.DataFrame({"pid": ["p0"], "text": [" "]}),
             queries=pd.DataFrame({"qid": ["q0"], "text": ["x"]}),
             qrels=pd.DataFrame({"qid": ["q0"], "pid": ["p0"], "relevance": [1]}),
+            allow_blank=True,
         )
         assert a.fingerprint() != b.fingerprint()
 

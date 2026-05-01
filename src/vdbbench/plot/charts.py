@@ -178,9 +178,7 @@ def plot_all(summary_path: str | Path, out: str | Path) -> dict[str, tuple[Path,
     summary = pd.read_parquet(summary_path)
     if summary.empty:
         raise ValueError(f"summary at {summary_path} is empty")
-    speedup_baseline: str | None = (
-        "chroma" if "chroma" in summary["db"].values else None
-    )
+    speedup_baseline: str | None = "chroma" if "chroma" in summary["db"].values else None
     return {
         "pareto": plot_pareto_frontier(summary, out),
         "recall": plot_axis_bars(

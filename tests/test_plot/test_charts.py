@@ -104,9 +104,7 @@ class TestCharts:
         png, svg = plot_speedup_vs_baseline(_toy_summary(), tmp_path, baseline_db="pgvector")
         assert png.exists() and svg.exists()
 
-    def test_speedup_chart_raises_when_named_baseline_missing(
-        self, tmp_path: Path
-    ) -> None:
+    def test_speedup_chart_raises_when_named_baseline_missing(self, tmp_path: Path) -> None:
         """If a baseline is explicitly named but not present in the data,
         raise — silently substituting the alphabetically-first DB used to
         let typos through and produce a chart titled against a DB that
