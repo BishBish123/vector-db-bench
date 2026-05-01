@@ -154,3 +154,25 @@ class TestPgVectorIndex:
     def test_search_before_setup_rejected(self, adapter: PgVectorAdapter) -> None:
         with pytest.raises(RuntimeError, match="setup"):
             adapter.search(np.zeros(8, dtype=np.float32), k=5)
+
+
+class TestPgVectorConnectionLifecycle:
+    def test_one_connection_open_per_setup_not_per_query(self, adapter: PgVectorAdapter) -> None:
+        """Connection-establishment should not be counted as ANN latency.
+
+        Earlier revisions of this adapter opened a fresh psycopg connection
+        on every search() call. On macOS Docker that's ~40 ms of TCP+auth
+        handshake per query, which makes the bench measure connection
+        churn rather than vector search. Assert exactly one open per
+        setup() so a regression here fails loud.
+        """
+        adapter.setup(dim=8, params={"index": "none"})
+        baseline = adapter._connection_opens
+        ids = [f"p{i}" for i in range(20)]
+        vecs = _random_vectors(20, 8, seed=5)
+        adapter.ingest(ids, vecs)
+        adapter.build_index()
+        for i in range(50):
+            adapter.search(vecs[i % 20], k=3)
+        # No new connection opens across ingest + index + 50 searches.
+        assert adapter._connection_opens == baseline

@@ -17,14 +17,20 @@ binding. Knobs land in the `params` dict — supported keys:
 `analyze_after_index=True` runs `ANALYZE` after the index build so the
 planner has accurate statistics. Disable it for "first-query cold" timings
 where you specifically want to measure plan-cache misses.
+
+Connection lifecycle: a single psycopg connection is opened in
+``setup()`` (with the ``vector`` type adapter registered once) and reused
+for every ``ingest`` / ``build_index`` / ``search`` call until
+``teardown()`` closes it. Earlier revisions opened a fresh connection
+per ``search()``, which on macOS Docker meant we benchmarked
+~40 ms of TCP+auth handshake on every query rather than ANN latency.
 """
 
 from __future__ import annotations
 
+import contextlib
 import math
 import time
-from collections.abc import Iterator
-from contextlib import contextmanager
 from typing import Any, cast
 
 import numpy as np
@@ -51,6 +57,14 @@ class PgVectorAdapter:
         self._params: dict[str, object] = {}
         self._operator: str = "<=>"
         self._opclass: str = "vector_cosine_ops"
+        # Long-lived connection — opened in setup, closed in teardown.
+        # Type set to Any so we don't require psycopg at import time.
+        self._conn: Any = None
+        # Counter for tests / observability: how many psycopg.connect calls
+        # the adapter has made over its lifetime. With a long-lived
+        # connection this should never exceed `setup() + teardown()` for a
+        # single bench run.
+        self._connection_opens: int = 0
 
     # ---------- lifecycle ----------
 
@@ -69,27 +83,55 @@ class PgVectorAdapter:
             if knob in params and int(cast(int | str, params[knob])) <= 0:
                 raise ValueError(f"{knob} must be positive, got {params[knob]!r}")
 
-        # Only mutate `self.*` after the DDL has successfully committed —
-        # otherwise a connection failure leaves the adapter looking
-        # initialized while the table doesn't exist.
-        with self._connect() as conn, conn.cursor() as cur:
-            cur.execute("CREATE EXTENSION IF NOT EXISTS vector")
-            cur.execute(f'DROP TABLE IF EXISTS "{self._table}"')
-            cur.execute(f'CREATE TABLE "{self._table}" (id text PRIMARY KEY, vec vector({dim}))')
-            conn.commit()
+        # If a previous setup call left a connection lying around (e.g.
+        # tests reusing the same adapter), close it before opening a fresh
+        # one — otherwise `setup` would not be idempotent.
+        self._close_connection()
+        # Open the long-lived connection once and register the vector type
+        # adapter on it. Every subsequent ingest/build_index/search call
+        # reuses this connection, so we measure ANN latency rather than
+        # TCP+auth handshake cost.
+        from pgvector.psycopg import register_vector  # noqa: PLC0415
+
+        conn = self._open_connection()
+        register_vector(conn)
+        try:
+            with conn.cursor() as cur:
+                cur.execute("CREATE EXTENSION IF NOT EXISTS vector")
+                cur.execute(f'DROP TABLE IF EXISTS "{self._table}"')
+                cur.execute(
+                    f'CREATE TABLE "{self._table}" (id text PRIMARY KEY, vec vector({dim}))'
+                )
+                conn.commit()
+        except Exception:
+            # If DDL fails, don't leave a half-initialized adapter behind.
+            self._close_connection()
+            raise
+        self._conn = conn
         self._dim = dim
         self._params = dict(params)
         self._operator, self._opclass = _DISTANCE_OPS[metric]
 
     def teardown(self) -> None:
-        with self._connect() as conn, conn.cursor() as cur:
-            cur.execute(f'DROP TABLE IF EXISTS "{self._table}"')
-            conn.commit()
+        # Drop the table on the long-lived connection if it's still alive,
+        # then close. Tolerate teardown being called twice in a row (the
+        # contract test exercises that path).
+        if self._conn is not None:
+            try:
+                with self._conn.cursor() as cur:
+                    cur.execute(f'DROP TABLE IF EXISTS "{self._table}"')
+                    self._conn.commit()
+            except Exception:
+                # If the connection died, fall through to close — we've
+                # already lost the table state we wanted to clean up.
+                pass
+        self._close_connection()
+        self._dim = None
 
     # ---------- ingest ----------
 
     def ingest(self, ids: list[str], vectors: np.ndarray, batch_size: int = 1024) -> IngestStats:
-        if self._dim is None:
+        if self._dim is None or self._conn is None:
             raise RuntimeError("ingest() called before setup()")
         if vectors.ndim != 2:
             raise ValueError(f"vectors must be 2-D, got shape {vectors.shape!r}")
@@ -104,35 +146,30 @@ class PgVectorAdapter:
         if vectors.dtype != np.float32:
             vectors = vectors.astype(np.float32, copy=False)
 
-        # `pgvector.psycopg.register_vector` teaches psycopg how to encode
-        # the numpy arrays as `vector(N)`. Must run *before* opening the
-        # cursor — otherwise the cursor caches a stale adapters dict and
-        # rejects ndarray with `cannot adapt type 'ndarray'`.
-        from pgvector.psycopg import register_vector  # noqa: PLC0415
-
+        # `register_vector` already ran in setup(); the long-lived
+        # connection still has the type adapter cached so we can pass
+        # ndarray rows directly.
         start = time.perf_counter()
-        with self._connect() as conn:
-            register_vector(conn)
-            with conn.cursor() as cur:
-                insert_sql = f'INSERT INTO "{self._table}" (id, vec) VALUES (%s, %s)'
-                for i in range(0, len(ids), batch_size):
-                    rows = [(ids[j], vectors[j]) for j in range(i, min(i + batch_size, len(ids)))]
-                    cur.executemany(insert_sql, rows)
-                conn.commit()
+        with self._conn.cursor() as cur:
+            insert_sql = f'INSERT INTO "{self._table}" (id, vec) VALUES (%s, %s)'
+            for i in range(0, len(ids), batch_size):
+                rows = [(ids[j], vectors[j]) for j in range(i, min(i + batch_size, len(ids)))]
+                cur.executemany(insert_sql, rows)
+            self._conn.commit()
         elapsed = time.perf_counter() - start
         return IngestStats(n_vectors=len(ids), elapsed_s=elapsed)
 
     # ---------- index ----------
 
     def build_index(self) -> IndexStats:
-        if self._dim is None:
+        if self._dim is None or self._conn is None:
             raise RuntimeError("build_index() called before setup()")
         # Already validated in setup; this is just to read the value.
         index_kind = str(self._params.get("index", "hnsw")).lower()
 
         start = time.perf_counter()
         bytes_disk = 0
-        with self._connect() as conn, conn.cursor() as cur:
+        with self._conn.cursor() as cur:
             if index_kind == "none":
                 pass
             elif index_kind == "hnsw":
@@ -164,14 +201,14 @@ class PgVectorAdapter:
             )
             row = cur.fetchone()
             bytes_disk = int(row[0]) if row else 0
-            conn.commit()
+            self._conn.commit()
         elapsed = time.perf_counter() - start
         return IndexStats(elapsed_s=elapsed, bytes_disk=bytes_disk)
 
     # ---------- search ----------
 
     def search(self, query: np.ndarray, k: int) -> list[str]:
-        if self._dim is None:
+        if self._dim is None or self._conn is None:
             raise RuntimeError("search() called before setup()")
         if k <= 0:
             raise ValueError("k must be positive")
@@ -182,17 +219,17 @@ class PgVectorAdapter:
         if query.dtype != np.float32:
             query = query.astype(np.float32, copy=False)
 
-        from pgvector.psycopg import register_vector  # noqa: PLC0415
-
-        with self._connect() as conn:
-            register_vector(conn)
-            with conn.cursor() as cur:
-                self._apply_query_knobs(cur)
-                cur.execute(
-                    f'SELECT id FROM "{self._table}" ORDER BY vec {self._operator} %s LIMIT %s',
-                    (query, k),
-                )
-                return [row[0] for row in cur.fetchall()]
+        # Reuse the long-lived connection — every search() used to spin up a
+        # fresh psycopg.connect (TCP+auth = ~40 ms on Docker for Mac), which
+        # turned the bench into a connection-establishment benchmark rather
+        # than an ANN-latency benchmark.
+        with self._conn.cursor() as cur:
+            self._apply_query_knobs(cur)
+            cur.execute(
+                f'SELECT id FROM "{self._table}" ORDER BY vec {self._operator} %s LIMIT %s',
+                (query, k),
+            )
+            return [row[0] for row in cur.fetchall()]
 
     def memory_footprint_bytes(self) -> int:
         # Server-side resident memory across the whole Postgres process is
@@ -202,15 +239,23 @@ class PgVectorAdapter:
 
     # ---------- internals ----------
 
-    @contextmanager
-    def _connect(self) -> Iterator[Any]:
+    def _open_connection(self) -> Any:
+        """Open a fresh psycopg connection and bump the open counter.
+
+        Tests assert this counter to verify the long-lived-connection
+        invariant (one open per `setup()`, not one per `search()`).
+        """
         import psycopg  # noqa: PLC0415
 
-        conn = psycopg.connect(self._dsn)
-        try:
-            yield conn
-        finally:
-            conn.close()
+        self._connection_opens += 1
+        return psycopg.connect(self._dsn)
+
+    def _close_connection(self) -> None:
+        if self._conn is None:
+            return
+        with contextlib.suppress(Exception):
+            self._conn.close()
+        self._conn = None
 
     def _apply_query_knobs(self, cur: Any) -> None:
         """Set per-session query-time knobs (HNSW ef_search, IVF probes)."""
