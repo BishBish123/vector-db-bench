@@ -207,7 +207,19 @@ class PgVectorAdapter:
 
     # ---------- search ----------
 
-    def search(self, query: np.ndarray, k: int) -> list[str]:
+    def search(
+        self,
+        query: np.ndarray,
+        k: int,
+        filter: dict[str, object] | None = None,
+    ) -> list[str]:
+        # pgvector adapter does not implement payload filters yet; the
+        # `filter` arg exists only to satisfy the protocol surface so the
+        # bench harness can drive every adapter through the same call.
+        if filter is not None:
+            raise NotImplementedError(
+                "pgvector adapter does not support filter+ANN; pass filter=None"
+            )
         if self._dim is None or self._conn is None:
             raise RuntimeError("search() called before setup()")
         if k <= 0:

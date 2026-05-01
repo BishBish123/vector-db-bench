@@ -171,7 +171,16 @@ class LanceDBAdapter:
 
     # ---------- search ----------
 
-    def search(self, query: np.ndarray, k: int) -> list[str]:
+    def search(
+        self,
+        query: np.ndarray,
+        k: int,
+        filter: dict[str, object] | None = None,
+    ) -> list[str]:
+        if filter is not None:
+            raise NotImplementedError(
+                "lancedb adapter does not support filter+ANN; pass filter=None"
+            )
         if self._dim is None or self._tbl is None:
             raise RuntimeError("search() called before setup()")
         if k <= 0:

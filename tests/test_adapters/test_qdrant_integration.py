@@ -127,6 +127,43 @@ class TestQdrantStorageKnobs:
             f"on_disk_vectors should propagate to VectorParams.on_disk, got {on_disk!r}"
         )
 
+    def test_filter_passthrough_subsets_results(self, adapter: QdrantAdapter) -> None:
+        """A `search(..., filter=...)` call must restrict candidates to
+        the matching payload, regardless of which point is closest in
+        vector space. The adapter used to advertise hybrid filter+ANN
+        without wiring the filter through; this test fails closed if a
+        regression silently re-introduces the unfiltered behavior.
+        """
+        adapter.setup(
+            dim=4,
+            params={"payload_indexed_fields": ["topic"]},
+        )
+        ids = [f"p{i}" for i in range(6)]
+        topics = ["medical", "medical", "medical", "legal", "legal", "legal"]
+        vecs = _random_vectors(6, 4, seed=42)
+        adapter.ingest(
+            ids,
+            vecs,
+            extra_payloads=[{"topic": t} for t in topics],
+        )
+        adapter.build_index()
+        q = vecs[0]  # vector belongs to a "medical" point
+
+        unfiltered = adapter.search(q, k=6)
+        filtered = adapter.search(
+            q,
+            k=6,
+            filter={"must": [{"key": "topic", "match": {"value": "legal"}}]},
+        )
+        # The unfiltered set covers both topics; the filtered set must be
+        # a subset and must only contain "legal" pids.
+        assert len(filtered) <= len(unfiltered)
+        legal_pids = {ids[i] for i, t in enumerate(topics) if t == "legal"}
+        assert set(filtered).issubset(legal_pids)
+        # And the filter must actually return *something* — empty results
+        # would also satisfy the subset check above.
+        assert len(filtered) > 0
+
     def test_payload_index_cost_lands_in_build_index_elapsed(self, adapter: QdrantAdapter) -> None:
         """Payload indexes used to be created in `setup()` before timing
         started, so cold-start filtered-query setup cost was reported as

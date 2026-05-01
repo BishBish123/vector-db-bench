@@ -90,8 +90,20 @@ class VectorStoreAdapter(Protocol):
         """Build the ANN index after ingest. May be a no-op for embedded stores."""
         ...
 
-    def search(self, query: np.ndarray, k: int) -> list[str]:
-        """Return the top-`k` ids for a single query vector (1-D)."""
+    def search(
+        self,
+        query: np.ndarray,
+        k: int,
+        filter: dict[str, object] | None = None,
+    ) -> list[str]:
+        """Return the top-`k` ids for a single query vector (1-D).
+
+        Adapters that support backend-side payload / metadata filters
+        (currently Qdrant) accept an optional `filter` dict and pass it
+        straight through. Adapters without filter support ignore the
+        argument; the bench runner only ever calls `search(query, k)` so
+        the default ``None`` keeps the existing surface intact.
+        """
         ...
 
     def memory_footprint_bytes(self) -> int:

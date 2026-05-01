@@ -30,6 +30,20 @@ the name implied.
 queries — Qdrant requires the field be indexed with a known type before
 `Filter` clauses can prune the search space. The harness ingests a
 `pid` payload by default; add the keys you intend to filter on.
+
+Hybrid filter+ANN is wired through `search(query, k, filter=...)`. The
+``filter`` dict is parsed as a Qdrant ``Filter`` and forwarded as
+``query_filter`` so any payload key listed in ``payload_indexed_fields``
+can be used to prune candidates. The adapter ingests the original
+string id under the ``pid`` payload key by default, so a quick
+filter+ANN test just needs ``payload_indexed_fields=["pid"]`` plus a
+filter like::
+
+    {"must": [{"key": "pid", "match": {"value": "p007"}}]}
+
+Custom payloads (e.g. a ``topic`` field) can be attached at ingest by
+passing ``extra_payloads=[{"topic": "medical"}, ...]`` parallel to
+``ids``; the adapter merges them into the per-point payload.
 """
 
 from __future__ import annotations
@@ -128,7 +142,13 @@ class QdrantAdapter:
 
     # ---------- ingest ----------
 
-    def ingest(self, ids: list[str], vectors: np.ndarray, batch_size: int = 1024) -> IngestStats:
+    def ingest(
+        self,
+        ids: list[str],
+        vectors: np.ndarray,
+        batch_size: int = 1024,
+        extra_payloads: list[dict[str, object]] | None = None,
+    ) -> IngestStats:
         if self._dim is None:
             raise RuntimeError("ingest() called before setup()")
         if vectors.ndim != 2:
@@ -141,6 +161,10 @@ class QdrantAdapter:
             raise ValueError(f"vector dim {vectors.shape[1]} != setup dim {self._dim}")
         if batch_size <= 0:
             raise ValueError("batch_size must be positive")
+        if extra_payloads is not None and len(extra_payloads) != len(ids):
+            raise ValueError(
+                f"extra_payloads length {len(extra_payloads)} != ids length {len(ids)}"
+            )
         if vectors.dtype != np.float32:
             vectors = vectors.astype(np.float32, copy=False)
 
@@ -161,14 +185,18 @@ class QdrantAdapter:
         start = time.perf_counter()
         for i in range(0, len(ids), batch_size):
             batch_slice = slice(i, min(i + batch_size, len(ids)))
-            points = [
-                models.PointStruct(
-                    id=new_int_ids[j],
-                    vector=vectors[j].tolist(),
-                    payload={"pid": ids[j]},
+            points = []
+            for j in range(batch_slice.start, batch_slice.stop):
+                payload: dict[str, object] = {"pid": ids[j]}
+                if extra_payloads is not None:
+                    payload.update(extra_payloads[j])
+                points.append(
+                    models.PointStruct(
+                        id=new_int_ids[j],
+                        vector=vectors[j].tolist(),
+                        payload=payload,
+                    )
                 )
-                for j in range(batch_slice.start, batch_slice.stop)
-            ]
             client.upsert(collection_name=self._collection, points=points, wait=True)
         elapsed = time.perf_counter() - start
         return IngestStats(n_vectors=len(ids), elapsed_s=elapsed)
@@ -204,7 +232,23 @@ class QdrantAdapter:
 
     # ---------- search ----------
 
-    def search(self, query: np.ndarray, k: int) -> list[str]:
+    def search(
+        self,
+        query: np.ndarray,
+        k: int,
+        filter: dict[str, object] | None = None,
+    ) -> list[str]:
+        """Top-`k` ids for `query`, optionally restricted by a payload filter.
+
+        `filter` is a dict shaped like Qdrant's ``Filter`` model JSON: e.g.
+        ``{"must": [{"key": "topic", "match": {"value": "medical"}}]}``.
+        It's passed straight through to ``query_points(query_filter=...)``,
+        so any field that was indexed via ``payload_indexed_fields`` in
+        ``setup()`` can be used as a prune condition. Pass ``None`` (the
+        default) for an unfiltered ANN search — the bench harness keeps
+        calling the adapter with two args, so existing callers are
+        unchanged.
+        """
         if self._dim is None:
             raise RuntimeError("search() called before setup()")
         if k <= 0:
@@ -223,6 +267,16 @@ class QdrantAdapter:
         search_params = (
             models.SearchParams(hnsw_ef=int(cast(int | str, ef))) if ef is not None else None
         )
+        # `Filter.parse_obj` (or `model_validate` in pydantic v2) is the
+        # supported way to construct a Filter from a dict. We try v2 first
+        # and fall back to the v1 alias so this works across qdrant-client
+        # versions.
+        query_filter = None
+        if filter is not None:
+            try:
+                query_filter = models.Filter.model_validate(filter)
+            except AttributeError:  # pragma: no cover - qdrant-client < 1.10
+                query_filter = models.Filter.parse_obj(filter)
         # `query_points` replaced the deprecated `search()` in qdrant-client
         # 1.10. Returns a `QueryResponse` with `.points` instead of a bare list.
         result = client.query_points(
@@ -230,6 +284,7 @@ class QdrantAdapter:
             query=query.tolist(),
             limit=k,
             search_params=search_params,
+            query_filter=query_filter,
             with_payload=True,
         )
         return [str(p.payload["pid"]) for p in result.points if p.payload and "pid" in p.payload]

@@ -105,7 +105,7 @@ Windows is unsupported (`Makefile` uses bash). WSL2 works.
 
 ## What this benchmark does NOT measure
 
-- Filtered search (`WHERE category = 'X' AND vector ≈ q`) — Phase 6 stretch.
+- Filtered search (`WHERE category = 'X' AND vector ≈ q`) — partially supported: Qdrant exposes filter+ANN through `QdrantAdapter.search(query, k, filter=...)` (see `tests/test_adapters/test_qdrant_integration.py::test_filter_passthrough_subsets_results`); pgvector / lancedb / chroma adapters reject a non-`None` filter explicitly. A cross-adapter sweep is the Phase 6 stretch.
 - Hybrid search (BM25 + vector) — Phase 6 stretch.
 - Multi-tenancy at scale.
 - Geo-replicated reads.
