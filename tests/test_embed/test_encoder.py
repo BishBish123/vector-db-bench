@@ -274,6 +274,55 @@ class TestSaveLoad:
         with pytest.warns(UserWarning, match="corpus has changed since encoding"):
             load_encoded_bundle(out)
 
+    def test_load_uses_zero_copy_path(self, tmp_path: Path) -> None:
+        """Reading vectors back must avoid the `to_pylist()` Python detour.
+
+        We can't directly assert "no Python list was allocated", but we can
+        verify the loaded matrix has the right dtype, shape, and contiguity
+        — the three things the new buffer path is supposed to guarantee
+        — and that a moderately large round-trip is fast (<500ms locally
+        for 5k x 384 = ~7.5 MB; the slow `to_pylist` path used to take
+        seconds for the same size).
+        """
+        import time as _time  # noqa: PLC0415
+
+        n, dim = 5_000, 384
+        bundle = CorpusBundle(
+            name="zero-copy",
+            passages=pd.DataFrame(
+                {
+                    "pid": [f"p{i:05d}" for i in range(n)],
+                    "text": [f"d{i}" for i in range(n)],
+                }
+            ),
+            queries=pd.DataFrame({"qid": ["q0"], "text": ["x"]}),
+            qrels=pd.DataFrame({"qid": ["q0"], "pid": ["p00000"], "relevance": [1]}),
+        )
+        # FakeEncoder caps dim at 64; build vectors directly so the test
+        # exercises a realistic embedding width.
+        rng = np.random.default_rng(0)
+        passage_vecs = rng.standard_normal((n, dim)).astype(np.float32)
+        query_vecs = rng.standard_normal((1, dim)).astype(np.float32)
+        encoded = EncodedBundle(
+            bundle=bundle,
+            passage_vectors=passage_vecs,
+            query_vectors=query_vecs,
+            encoder_name="rand",
+        )
+        out = encoded.save(tmp_path / "zerocopy")
+
+        t0 = _time.perf_counter()
+        loaded = load_encoded_bundle(out)
+        elapsed = _time.perf_counter() - t0
+
+        assert loaded.passage_vectors.shape == (n, dim)
+        assert loaded.passage_vectors.dtype == np.float32
+        assert loaded.passage_vectors.flags["C_CONTIGUOUS"]
+        np.testing.assert_array_equal(loaded.passage_vectors, encoded.passage_vectors)
+        # Generous bound — the buffer path should finish in well under
+        # 500ms on a laptop. The pylist path used to take >2s here.
+        assert elapsed < 2.0, f"load took {elapsed:.2f}s — pylist regression?"
+
     def test_save_does_not_materialize_full_matrix_as_python(self, tmp_path: Path) -> None:
         """Regression: `vecs.tolist()` would OOM on benchmark-sized matrices.
 

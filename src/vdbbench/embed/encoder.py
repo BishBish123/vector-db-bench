@@ -295,14 +295,50 @@ def _read_vectors(path: Path, expected_ids: pd.Series[str], expected_dim: int) -
     if not ids:
         # `np.array([])` would be 1-D, breaking the EncodedBundle invariant.
         return np.zeros((0, expected_dim), dtype=np.float32)
-    arr = np.array(table.column("vector").to_pylist(), dtype=np.float32)
-    actual_dim = int(arr.shape[1]) if arr.ndim == 2 else -1
+
+    # Read the FixedSizeListArray's underlying float32 buffer straight into
+    # NumPy, instead of going through `to_pylist()` -> Python list of lists
+    # -> `np.array(...)`. The pylist path materializes ~N*dim Python float
+    # objects (~40 bytes each) before NumPy can rebuild the contiguous
+    # buffer; on a 1M x 384 corpus that's ~15 GB of transient Python heap,
+    # enough to OOM most laptops.
+    column = table.column("vector")
+    # The list-element-size is part of the parquet schema; trust it as the
+    # *actual* dim so we can detect a mismatch with `expected_dim` rather
+    # than silently reshaping (and turning a 6x8 buffer into a 3x16 read).
+    list_type = column.type
+    actual_dim = int(getattr(list_type, "list_size", -1))
     if actual_dim != expected_dim:
         raise ValueError(
             f"vector file {path.name} has dim {actual_dim} but the manifest "
             f"declares dim {expected_dim} — likely a different encoder's "
             f"output got swapped in"
         )
+    chunks = column.chunks if hasattr(column, "chunks") else [column]
+    parts: list[np.ndarray] = []
+    for chunk in chunks:
+        # `pa.FixedSizeListArray.values` is the flat 1-D child buffer of the
+        # list type; `zero_copy_only=False` lets pyarrow copy when alignment
+        # forces it (rare) but still avoids the Python-list detour.
+        flat = chunk.values.to_numpy(zero_copy_only=False)
+        parts.append(flat)
+    flat_all = np.concatenate(parts) if len(parts) > 1 else parts[0]
+    if flat_all.dtype != np.float32:
+        # Manifest declared float32, so this is a "different encoder slipped
+        # vectors in" failure, not a transparent widening case.
+        raise ValueError(f"vector file {path.name} has dtype {flat_all.dtype}, expected float32")
+    if flat_all.size % actual_dim != 0:
+        raise ValueError(
+            f"vector file {path.name} flat buffer size {flat_all.size} is not a "
+            f"multiple of dim {actual_dim}"
+        )
+    n = flat_all.size // actual_dim
+    arr = flat_all.reshape(n, actual_dim)
+    # `np.ascontiguousarray` is cheap when the buffer is already contiguous
+    # and forces a contiguous copy otherwise; downstream adapters need
+    # row-contiguous float32 to avoid silent slow paths.
+    if not arr.flags["C_CONTIGUOUS"]:
+        arr = np.ascontiguousarray(arr)
     return arr
 
 
