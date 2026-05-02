@@ -12,19 +12,30 @@ ingest -> index -> warm-up -> measured-search lifecycle and collect:
 Outputs are parquet so a reviewer can re-run the analysis without
 re-running the bench. The harness is intentionally adapter-agnostic —
 per-DB knob exploration lives in the configurations the caller passes.
+
+Saved alongside `summary.parquet` and `timings.parquet` is a
+`bench_manifest.json` (schema_version starts at 1) that binds the
+parquet files to the encoded bundle they ran against, captures encoder
+identity / adapter versions / host metadata, and stamps the bench
+spec — everything a reviewer needs to verify what was actually run.
 """
 
 from __future__ import annotations
 
+import datetime as _dt
 import hashlib
 import json
+import platform
+import sys
 import time
 from dataclasses import asdict, dataclass, field
+from importlib import metadata as _import_metadata
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
+from vdbbench import __version__ as _vdbbench_version
 from vdbbench.adapters.base import IndexStats, IngestStats, VectorStoreAdapter
 from vdbbench.embed.encoder import EncodedBundle
 from vdbbench.metrics.retrieval import (
@@ -33,6 +44,9 @@ from vdbbench.metrics.retrieval import (
     ndcg_at_k,
     recall_at_k,
 )
+
+# Bumped any time the manifest schema changes in a way readers care about.
+BENCH_MANIFEST_SCHEMA_VERSION: int = 1
 
 _PROFILE_DEFAULTS: dict[str, dict[str, int]] = {
     # name -> default warmup_queries and repeats. Profile only nudges the
@@ -140,16 +154,27 @@ class RunSummary:
 
 @dataclass(frozen=True)
 class BenchResult:
-    """Per-query timings + per-(db, params) summary, both ready for parquet."""
+    """Per-query timings + per-(db, params) summary, both ready for parquet.
+
+    `manifest` is a dict shaped like `bench_manifest.json` (see
+    `_build_manifest()`); `save()` writes it next to the parquet files
+    so a reviewer can verify which encoded bundle, encoder, and
+    adapter versions produced the numbers.
+    """
 
     timings: pd.DataFrame
     summary: pd.DataFrame
+    manifest: dict[str, object] = field(default_factory=dict)
 
     def save(self, root: str | Path) -> Path:
         out = Path(root)
         out.mkdir(parents=True, exist_ok=True)
         self.timings.to_parquet(out / "timings.parquet", index=False)
         self.summary.to_parquet(out / "summary.parquet", index=False)
+        if self.manifest:
+            (out / "bench_manifest.json").write_text(
+                json.dumps(self.manifest, indent=2, sort_keys=True, default=str)
+            )
         return out
 
 
@@ -185,6 +210,7 @@ def run_bench(
     timing_rows: list[QueryTiming] = []
     summary_rows: list[RunSummary] = []
 
+    bench_started_at = _dt.datetime.now(_dt.UTC)
     for spec in specs:
         if progress:
             print(f"[bench] {spec.display_label()} — setup", flush=True)
@@ -231,11 +257,117 @@ def run_bench(
             )
         finally:
             spec.adapter.teardown()
+    bench_completed_at = _dt.datetime.now(_dt.UTC)
 
+    manifest = _build_manifest(encoded, specs, bench_started_at, bench_completed_at)
     return BenchResult(
         timings=pd.DataFrame([_qt_to_row(t) for t in timing_rows]),
         summary=pd.DataFrame([asdict(r) for r in summary_rows]),
+        manifest=manifest,
     )
+
+
+def _build_manifest(
+    encoded: EncodedBundle,
+    specs: list[BenchSpec],
+    started_at: _dt.datetime,
+    completed_at: _dt.datetime,
+) -> dict[str, object]:
+    """Build the `bench_manifest.json` payload.
+
+    Captures everything a reviewer needs to verify what was actually
+    run: schema version (so future readers can branch), encoded bundle
+    fingerprint, encoder identity, per-adapter package versions
+    (best-effort via importlib.metadata), and best-effort host metadata
+    (no PII — just CPU/OS/python info that frames the latency numbers).
+    """
+    return {
+        "schema_version": BENCH_MANIFEST_SCHEMA_VERSION,
+        "encoded_bundle_fingerprint": encoded.bundle.fingerprint(),
+        "encoder_name": encoded.encoder_name,
+        "encoder_dim": int(encoded.dim),
+        "adapter_versions": _adapter_versions(specs),
+        "host_metadata": _host_metadata(),
+        "bench_started_at": started_at.isoformat(),
+        "bench_completed_at": completed_at.isoformat(),
+        "vdbbench_version": _vdbbench_version,
+        "bench_specs": [_spec_to_dict(s) for s in specs],
+    }
+
+
+def _spec_to_dict(spec: BenchSpec) -> dict[str, object]:
+    """A jsonable view of a BenchSpec — adapter as `name`, params verbatim."""
+    return {
+        "adapter": spec.adapter.name,
+        "params": dict(spec.params),
+        "k": int(spec.k),
+        "warmup_queries": int(spec.warmup_queries),
+        "repeats": int(spec.repeats),
+        "label": spec.display_label(),
+        "profile": spec.profile,
+        "params_hash": spec.params_hash(),
+    }
+
+
+def _adapter_versions(specs: list[BenchSpec]) -> dict[str, str]:
+    """Resolve installed package versions for every adapter in `specs`.
+
+    Maps adapter.name -> "package==version". Unknown adapters and
+    missing packages get the literal "unknown" so the manifest never
+    misses a row, but a careful reviewer can spot the gap.
+    """
+    # adapter.name -> the pypi distribution that backs it.
+    backends: dict[str, str] = {
+        "pgvector": "pgvector",
+        "qdrant": "qdrant-client",
+        "lancedb": "lancedb",
+        "chroma": "chromadb",
+    }
+    out: dict[str, str] = {}
+    for spec in specs:
+        name = spec.adapter.name
+        if name in out:
+            continue
+        pkg = backends.get(name)
+        if pkg is None:
+            out[name] = "unknown"
+            continue
+        try:
+            out[name] = f"{pkg}=={_import_metadata.version(pkg)}"
+        except _import_metadata.PackageNotFoundError:
+            out[name] = f"{pkg}==unknown"
+    return out
+
+
+def _host_metadata() -> dict[str, object]:
+    """Best-effort (no-PII) machine metadata.
+
+    Captures CPU / OS / interpreter so reviewers can frame the latency
+    numbers — "this was a 4-core macOS Intel laptop, not an EC2 box"
+    — without leaking the user's hostname, MAC, or working directory.
+    Total memory comes from psutil if available; the bench already
+    depends on psutil for memory sampling so this is free.
+    """
+    meta: dict[str, object] = {
+        "platform": platform.platform(),
+        "machine": platform.machine(),
+        "processor": platform.processor() or "unknown",
+        "python_version": sys.version.split()[0],
+        "python_implementation": platform.python_implementation(),
+    }
+    try:
+        import os  # noqa: PLC0415
+
+        meta["cpu_count"] = os.cpu_count() or 0
+    except Exception:  # pragma: no cover - defensive
+        meta["cpu_count"] = 0
+    try:
+        import psutil  # noqa: PLC0415
+
+        meta["total_memory_bytes"] = int(psutil.virtual_memory().total)
+    except Exception:  # pragma: no cover - psutil missing or unreadable
+        meta["total_memory_bytes"] = 0
+    return meta
 
 
 def _qt_to_row(qt: QueryTiming) -> dict[str, object]:

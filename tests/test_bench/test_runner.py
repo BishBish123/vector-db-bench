@@ -178,6 +178,46 @@ class TestRunBench:
         round_tripped = pd.read_parquet(out / "summary.parquet")
         assert list(round_tripped.columns) == list(result.summary.columns)
 
+    def test_bench_writes_manifest_alongside_summary(self, tmp_path: Path) -> None:
+        """Every bench run drops a `bench_manifest.json` next to the parquet
+        files so a reviewer can verify which encoded bundle, encoder, and
+        adapter versions produced the numbers."""
+        import json as _json  # noqa: PLC0415
+
+        encoded = _toy_encoded()
+        result = run_bench(encoded, [BenchSpec(adapter=_MemAdapter(), k=2)])
+        out = result.save(tmp_path / "bench-out")
+        manifest_path = out / "bench_manifest.json"
+        assert manifest_path.exists()
+        manifest = _json.loads(manifest_path.read_text())
+        # Required fields present and well-typed.
+        for key in (
+            "schema_version",
+            "encoded_bundle_fingerprint",
+            "encoder_name",
+            "encoder_dim",
+            "adapter_versions",
+            "host_metadata",
+            "bench_started_at",
+            "bench_completed_at",
+            "bench_specs",
+        ):
+            assert key in manifest, f"missing manifest key {key!r}"
+
+    def test_manifest_records_encoded_bundle_fingerprint(self) -> None:
+        encoded = _toy_encoded()
+        result = run_bench(encoded, [BenchSpec(adapter=_MemAdapter(), k=2)])
+        assert result.manifest["encoded_bundle_fingerprint"] == encoded.bundle.fingerprint()
+        assert result.manifest["encoder_name"] == encoded.encoder_name
+        assert result.manifest["encoder_dim"] == encoded.dim
+
+    def test_manifest_schema_version_starts_at_1(self) -> None:
+        """The manifest schema version is the explicit contract for future
+        readers — pin it so a bump is intentional."""
+        encoded = _toy_encoded()
+        result = run_bench(encoded, [BenchSpec(adapter=_MemAdapter(), k=2)])
+        assert result.manifest["schema_version"] == 1
+
     def test_latency_records_actual_time(self) -> None:
         """Latency must be measured per query, not zero."""
         encoded = _toy_encoded()
