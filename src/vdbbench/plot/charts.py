@@ -48,20 +48,59 @@ def _save_both(fig: matplotlib.figure.Figure, out: Path, name: str) -> tuple[Pat
     return png, svg
 
 
-def plot_pareto_frontier(summary: pd.DataFrame, out: str | Path) -> tuple[Path, Path]:
-    """Recall@k (x) vs p95 latency (y), one connected curve per DB.
+def _pareto_filter(sub: pd.DataFrame) -> pd.DataFrame:
+    """Filter `sub` to its recall/latency Pareto frontier.
 
-    Within each DB, points are sorted by recall ascending so the curve
-    actually traces a monotonic frontier when the bench sweep covers the
-    accuracy/latency tradeoff knobs (e.g. HNSW ef_search).
+    A point is dominated when some other point has both **higher or
+    equal** recall *and* **lower or equal** latency, with at least one
+    of those inequalities strict. We keep only the non-dominated points.
+
+    Tie-breaking: equal-recall, lower-latency wins. The previous
+    implementation just sorted by recall and connected every point,
+    leaving dominated points on the published frontier.
+    """
+    if sub.empty:
+        return sub
+    # Sort by recall descending, latency ascending — equal-recall ties
+    # then prefer the lower-latency row, so a forward sweep can simply
+    # keep the running minimum latency.
+    df = sub.sort_values(
+        by=["recall_at_k_mean", "latency_ms_p95"],
+        ascending=[False, True],
+    ).reset_index(drop=True)
+    keep_idx: list[int] = []
+    best_lat = float("inf")
+    for i, row in df.iterrows():
+        lat = float(row["latency_ms_p95"])
+        # We're walking high-recall-first; a row survives only if it
+        # offers strictly better latency than every higher-recall row
+        # we've already kept. Otherwise some prior row dominates it.
+        if lat < best_lat:
+            keep_idx.append(int(i))
+            best_lat = lat
+    # Plot left-to-right by recall ascending so the curve still reads as
+    # "more recall = more latency" without zig-zagging on ties.
+    return df.iloc[keep_idx].sort_values("recall_at_k_mean").reset_index(drop=True)
+
+
+def plot_pareto_frontier(summary: pd.DataFrame, out: str | Path) -> tuple[Path, Path]:
+    """Recall@k (x) vs p95 latency (y), one Pareto curve per DB.
+
+    For each DB we filter out dominated points first (a point is
+    dominated when some other point has higher-or-equal recall AND
+    lower-or-equal latency, strictly better in at least one) and then
+    connect the survivors left-to-right by recall. The previous
+    implementation sorted points by recall and connected every one of
+    them, which left dominated points on the published frontier.
     """
     out_path = _ensure_outdir(out)
     fig, ax = plt.subplots(figsize=(8, 6))
     for db in sorted(summary["db"].unique()):
-        sub = summary[summary["db"] == db].sort_values("recall_at_k_mean")
+        sub = summary[summary["db"] == db]
+        frontier = _pareto_filter(sub)
         ax.plot(
-            sub["recall_at_k_mean"],
-            sub["latency_ms_p95"],
+            frontier["recall_at_k_mean"],
+            frontier["latency_ms_p95"],
             marker="o",
             linewidth=1.5,
             label=db,

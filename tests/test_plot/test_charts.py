@@ -8,6 +8,7 @@ import pandas as pd
 import pytest
 
 from vdbbench.plot.charts import (
+    _pareto_filter,
     plot_all,
     plot_axis_bars,
     plot_pareto_frontier,
@@ -121,3 +122,38 @@ class TestCharts:
         with pytest.warns(UserWarning, match="alphabetically-first"):
             png, svg = plot_speedup_vs_baseline(df, tmp_path, baseline_db=None)
         assert png.exists() and svg.exists()
+
+    def test_pareto_filters_dominated_points(self) -> None:
+        """A point with both lower recall AND higher latency is dominated
+        and must not appear on the Pareto frontier curve.
+        """
+        df = pd.DataFrame(
+            [
+                # Pareto-optimal: high recall, low latency.
+                {"db": "x", "recall_at_k_mean": 0.9, "latency_ms_p95": 5.0},
+                # Pareto-optimal: lower recall but even lower latency.
+                {"db": "x", "recall_at_k_mean": 0.7, "latency_ms_p95": 1.0},
+                # Dominated by both above (worse recall AND worse latency
+                # than the 0.9/5.0 point).
+                {"db": "x", "recall_at_k_mean": 0.7, "latency_ms_p95": 20.0},
+                # Dominated by the 0.7/1.0 point (same recall, higher latency).
+                {"db": "x", "recall_at_k_mean": 0.7, "latency_ms_p95": 4.0},
+            ]
+        )
+        frontier = _pareto_filter(df)
+        kept = list(zip(frontier["recall_at_k_mean"], frontier["latency_ms_p95"], strict=True))
+        # Two non-dominated points; sorted left-to-right by recall ascending.
+        assert kept == [(0.7, 1.0), (0.9, 5.0)]
+
+    def test_pareto_tie_break_prefers_lower_latency(self) -> None:
+        """Equal-recall ties go to the lower-latency point."""
+        df = pd.DataFrame(
+            [
+                {"db": "x", "recall_at_k_mean": 0.8, "latency_ms_p95": 10.0},
+                {"db": "x", "recall_at_k_mean": 0.8, "latency_ms_p95": 3.0},  # winner
+                {"db": "x", "recall_at_k_mean": 0.8, "latency_ms_p95": 7.0},
+            ]
+        )
+        frontier = _pareto_filter(df)
+        assert len(frontier) == 1
+        assert float(frontier.iloc[0]["latency_ms_p95"]) == 3.0
