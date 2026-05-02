@@ -93,6 +93,16 @@ def bench(
     chroma_path: Path | None = typer.Option(
         None, help="If set, run the chroma adapter against this directory."
     ),
+    all_adapters: bool = typer.Option(
+        False,
+        "--all",
+        help=(
+            "Run every adapter the local install supports with sensible defaults: "
+            "pgvector at the standard local DSN, qdrant at the standard local URL, "
+            "and lancedb / chroma at data/lancedb / data/chroma if their wheels are "
+            "importable. Equivalent to passing every --*-dsn / --*-path flag."
+        ),
+    ),
     k: int = typer.Option(10, help="Top-k for retrieval."),
     repeats: int = typer.Option(
         -1,
@@ -110,6 +120,31 @@ def bench(
     """Run the bench across every adapter the user enabled by passing a DSN/path."""
     from vdbbench.bench import BenchSpec, run_bench  # noqa: PLC0415
     from vdbbench.embed import load_encoded_bundle  # noqa: PLC0415
+
+    # `--all` populates the per-adapter knobs the caller didn't set so the
+    # default reproduces the README pipeline. Explicit flags still win.
+    if all_adapters:
+        if pgvector_dsn is None:
+            pgvector_dsn = "postgresql://bench:bench@localhost:5433/bench"
+        if qdrant_url is None:
+            qdrant_url = "http://localhost:6333"
+        # Embedded adapters: only enable when the wheel is actually
+        # importable on the host — otherwise the user gets a confusing
+        # ImportError instead of a "skipped" message.
+        if lancedb_path is None:
+            try:
+                import lancedb  # noqa: F401, PLC0415
+
+                lancedb_path = Path("data/lancedb")
+            except ImportError:
+                console.print("[yellow]--all:[/] skipping lancedb (no wheel for this platform)")
+        if chroma_path is None:
+            try:
+                import chromadb  # noqa: F401, PLC0415
+
+                chroma_path = Path("data/chroma")
+            except ImportError:
+                console.print("[yellow]--all:[/] skipping chroma (no wheel for this platform)")
 
     enc = load_encoded_bundle(encoded)
     specs: list[BenchSpec] = []
@@ -169,7 +204,8 @@ def bench(
     if not specs:
         console.print(
             "[yellow]no adapters enabled[/] — pass at least one of "
-            "--pgvector-dsn / --qdrant-url / --lancedb-path / --chroma-path"
+            "--pgvector-dsn / --qdrant-url / --lancedb-path / --chroma-path, "
+            "or --all to use sensible defaults"
         )
         raise typer.Exit(code=2)
 

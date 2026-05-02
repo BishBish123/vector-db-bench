@@ -74,7 +74,7 @@ prep: ## Build corpus + ground-truth (deterministic)
 	$(UV) run vdbbench prep --sample-size $(SAMPLE_SIZE) --embed-model $(EMBED_MODEL)
 
 .PHONY: bench
-bench: ## Run benchmark across all DBs
+bench: ## Run benchmark across all DBs (pgvector + qdrant via Docker; lancedb/chroma if installed)
 	$(UV) run vdbbench bench --all
 
 .PHONY: bench-all
