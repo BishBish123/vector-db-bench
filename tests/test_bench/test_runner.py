@@ -228,3 +228,18 @@ class TestBenchSpecProfile:
         spec = BenchSpec(adapter=_MemAdapter(), k=2, profile="cold")
         result = run_bench(encoded, [spec])
         assert result.summary.iloc[0]["profile"] == "cold"
+
+    def test_profile_p99_yields_5_repeats_when_repeats_not_set(self) -> None:
+        """The CLI passes the -1 sentinel for `repeats` so the profile picks
+        the default. With profile=p99 that's 5 repeats — used to be silently
+        clamped to 1 because the CLI hard-coded `repeats=1`.
+        """
+        spec = BenchSpec(adapter=_MemAdapter(), profile="p99", repeats=-1)
+        assert spec.repeats == 5
+
+    def test_explicit_repeats_overrides_profile(self) -> None:
+        """Explicit `repeats=N` (any positive int) wins over the profile default."""
+        spec = BenchSpec(adapter=_MemAdapter(), profile="p99", repeats=2)
+        assert spec.repeats == 2
+        spec_warm = BenchSpec(adapter=_MemAdapter(), profile="warm", repeats=7)
+        assert spec_warm.repeats == 7

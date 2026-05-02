@@ -94,7 +94,14 @@ def bench(
         None, help="If set, run the chroma adapter against this directory."
     ),
     k: int = typer.Option(10, help="Top-k for retrieval."),
-    repeats: int = typer.Option(1, help="Number of measured query passes per spec."),
+    repeats: int = typer.Option(
+        -1,
+        help=(
+            "Number of measured query passes per spec. The default sentinel -1 "
+            "means 'use the profile default' (cold/warm => 1, p99 => 5); pass an "
+            "explicit positive value to override."
+        ),
+    ),
     profile: str = typer.Option(
         "warm",
         help="Bench profile: 'cold' (no warm-up), 'warm' (default), 'p99' (50 warm-up + 5 repeats).",
