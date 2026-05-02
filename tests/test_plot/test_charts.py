@@ -91,7 +91,15 @@ class TestCharts:
         df.to_parquet(path, index=False)
         with pytest.warns(UserWarning, match="alphabetically-first"):
             result = plot_all(path, tmp_path / "out")
-        for name in ("pareto", "recall", "latency", "ingest", "index_disk", "speedup"):
+        for name in (
+            "pareto",
+            "recall",
+            "latency",
+            "ingest",
+            "index_disk",
+            "speedup",
+            "memory_recall",
+        ):
             png, svg = result[name]
             assert png.exists() and svg.exists()
 

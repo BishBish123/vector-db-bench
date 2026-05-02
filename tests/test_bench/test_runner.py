@@ -218,6 +218,42 @@ class TestRunBench:
         result = run_bench(encoded, [BenchSpec(adapter=_MemAdapter(), k=2)])
         assert result.manifest["schema_version"] == 1
 
+    def test_run_bench_records_memory_columns(self) -> None:
+        """Every memory column on RunSummary must be populated by the runner.
+
+        Adapters expose memory_footprint_bytes() and the harness depends on
+        psutil for RSS sampling — but the bench used to throw all of that
+        on the floor. Pin the columns so a regression here fails loud.
+        """
+        encoded = _toy_encoded()
+        result = run_bench(encoded, [BenchSpec(adapter=_MemAdapter(), k=2)])
+        for col in (
+            "baseline_rss_bytes",
+            "index_rss_bytes",
+            "peak_rss_bytes",
+            "adapter_memory_bytes",
+        ):
+            assert col in result.summary.columns, f"missing memory column {col!r}"
+        # peak_rss should be at least baseline (process can only grow during
+        # a synchronous bench run, modulo gc returning pages — assert >= 0
+        # rather than > baseline so we don't flake on a freed-pages run).
+        row = result.summary.iloc[0]
+        assert int(row["baseline_rss_bytes"]) > 0
+        assert int(row["peak_rss_bytes"]) >= 0
+
+    def test_summary_parquet_has_memory_schema(self, tmp_path: Path) -> None:
+        encoded = _toy_encoded()
+        result = run_bench(encoded, [BenchSpec(adapter=_MemAdapter(), k=2)])
+        out = result.save(tmp_path / "bench-out")
+        round_tripped = pd.read_parquet(out / "summary.parquet")
+        for col in (
+            "baseline_rss_bytes",
+            "index_rss_bytes",
+            "peak_rss_bytes",
+            "adapter_memory_bytes",
+        ):
+            assert col in round_tripped.columns, f"summary parquet missing {col!r}"
+
     def test_latency_records_actual_time(self) -> None:
         """Latency must be measured per query, not zero."""
         encoded = _toy_encoded()

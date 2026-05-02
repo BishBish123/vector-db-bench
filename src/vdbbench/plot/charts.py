@@ -118,6 +118,49 @@ def plot_pareto_frontier(summary: pd.DataFrame, out: str | Path) -> tuple[Path, 
     return paths
 
 
+def plot_memory_vs_recall(summary: pd.DataFrame, out: str | Path) -> tuple[Path, Path]:
+    """Scatter plot: peak RSS (y) vs recall@k mean (x), one mark per (db, params).
+
+    Honest companion to ``plot_pareto_frontier`` for the latency-vs-memory
+    tradeoff. Falls back gracefully when memory columns are missing or
+    all zero (e.g. older summaries from before memory sampling landed)
+    by emitting an empty axes with an annotation, so ``plot_all`` doesn't
+    have to gate the call.
+    """
+    out_path = _ensure_outdir(out)
+    fig, ax = plt.subplots(figsize=(8, 6))
+    if "peak_rss_bytes" not in summary.columns or float(summary["peak_rss_bytes"].max()) == 0.0:
+        ax.text(
+            0.5,
+            0.5,
+            "no peak_rss_bytes data in summary\n(re-run bench with the memory-aware harness)",
+            ha="center",
+            va="center",
+            transform=ax.transAxes,
+            fontsize=12,
+        )
+        ax.set_axis_off()
+    else:
+        for db in sorted(summary["db"].unique()):
+            sub = summary[summary["db"] == db]
+            ax.scatter(
+                sub["recall_at_k_mean"],
+                sub["peak_rss_bytes"] / (1024 * 1024),
+                label=db,
+                color=_DB_COLORS.get(db),
+                s=60,
+            )
+        ax.set_xlabel("Recall@k (mean)")
+        ax.set_ylabel("Peak RSS (MiB)")
+        ax.grid(True, linestyle="--", alpha=0.4)
+        ax.set_title("Memory vs recall — bench-process peak RSS per (db, params)")
+        ax.legend()
+    fig.tight_layout()
+    paths = _save_both(fig, out_path, "memory_recall")
+    plt.close(fig)
+    return paths
+
+
 def plot_axis_bars(
     summary: pd.DataFrame,
     out: str | Path,
@@ -256,4 +299,5 @@ def plot_all(summary_path: str | Path, out: str | Path) -> dict[str, tuple[Path,
             log=True,
         ),
         "speedup": plot_speedup_vs_baseline(summary, out, baseline_db=speedup_baseline),
+        "memory_recall": plot_memory_vs_recall(summary, out),
     }

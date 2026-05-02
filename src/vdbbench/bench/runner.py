@@ -128,7 +128,20 @@ class QueryTiming:
 
 @dataclass(frozen=True)
 class RunSummary:
-    """One row in the per-(db, params) summary table."""
+    """One row in the per-(db, params) summary table.
+
+    Memory columns:
+      * ``baseline_rss_bytes`` — RSS of the bench process before setup.
+      * ``index_rss_bytes`` — RSS after build_index returned (so embedded
+        adapters' index footprint is included; service adapters report
+        only the harness's own growth).
+      * ``peak_rss_bytes`` — RSS sampled after the measured queries
+        finished. For long-running specs this is the most useful number.
+      * ``adapter_memory_bytes`` — what the adapter itself reports via
+        ``memory_footprint_bytes()``. Some adapters return 0 (server-side
+        memory is not meaningful per-table); kept here so a reviewer can
+        compare vs. the harness RSS without touching adapter internals.
+    """
 
     db: str
     label: str
@@ -150,6 +163,10 @@ class RunSummary:
     recall_at_k_p50: float
     ndcg_at_k_mean: float
     qps_estimate: float  # 1000 / latency_ms_mean
+    baseline_rss_bytes: int = 0
+    index_rss_bytes: int = 0
+    peak_rss_bytes: int = 0
+    adapter_memory_bytes: int = 0
 
 
 @dataclass(frozen=True)
@@ -214,10 +231,16 @@ def run_bench(
     for spec in specs:
         if progress:
             print(f"[bench] {spec.display_label()} — setup", flush=True)
+        # Sample RSS of the bench process before setup so callers can read
+        # peak/index RSS as deltas against this baseline. psutil is a
+        # required dep, but we still guard the import so a missing
+        # build can't break the whole run.
+        baseline_rss = _sample_rss_bytes()
         spec.adapter.setup(encoded.dim, spec.params)
         try:
             ingest_stats = spec.adapter.ingest(pids, encoded.passage_vectors)
             index_stats = spec.adapter.build_index()
+            index_rss = _sample_rss_bytes()
 
             # Warm-up — exercise the cache + kick the JIT path before timing.
             warmup_n = min(spec.warmup_queries, len(qids))
@@ -250,9 +273,26 @@ def run_bench(
                         recalls.append(recall_at_k(retrieved, rel, spec.k))
                         ndcgs.append(ndcg_at_k(retrieved, rel, spec.k))
 
+            peak_rss = max(_sample_rss_bytes(), index_rss)
+            adapter_mem = 0
+            try:
+                adapter_mem = int(spec.adapter.memory_footprint_bytes())
+            except Exception:  # pragma: no cover - adapter-level instability
+                adapter_mem = 0
+
             summary_rows.append(
                 _build_summary(
-                    spec, encoded, ingest_stats, index_stats, recalls, ndcgs, latencies_ms
+                    spec,
+                    encoded,
+                    ingest_stats,
+                    index_stats,
+                    recalls,
+                    ndcgs,
+                    latencies_ms,
+                    baseline_rss=baseline_rss,
+                    index_rss=index_rss,
+                    peak_rss=peak_rss,
+                    adapter_memory=adapter_mem,
                 )
             )
         finally:
@@ -382,6 +422,21 @@ def _qt_to_row(qt: QueryTiming) -> dict[str, object]:
     }
 
 
+def _sample_rss_bytes() -> int:
+    """Best-effort RSS sample for the bench process.
+
+    psutil is a required dep, but we keep the import lazy + defensive so
+    a stripped install can't break the whole run. Returns 0 on failure
+    so the column stays well-typed in the parquet output.
+    """
+    try:
+        import psutil  # noqa: PLC0415
+
+        return int(psutil.Process().memory_info().rss)
+    except Exception:  # pragma: no cover - psutil missing or unreadable
+        return 0
+
+
 def _build_summary(
     spec: BenchSpec,
     encoded: EncodedBundle,
@@ -390,6 +445,11 @@ def _build_summary(
     recalls: list[float],
     ndcgs: list[float],
     latencies_ms: list[float],
+    *,
+    baseline_rss: int = 0,
+    index_rss: int = 0,
+    peak_rss: int = 0,
+    adapter_memory: int = 0,
 ) -> RunSummary:
     lat = aggregate(latencies_ms)
     rec = aggregate(recalls)
@@ -421,4 +481,8 @@ def _build_summary(
         recall_at_k_p50=rec["p50"],
         ndcg_at_k_mean=ndcg["mean"],
         qps_estimate=qps,
+        baseline_rss_bytes=int(baseline_rss),
+        index_rss_bytes=int(index_rss),
+        peak_rss_bytes=int(peak_rss),
+        adapter_memory_bytes=int(adapter_memory),
     )
