@@ -6,7 +6,12 @@
 
 services:
   pgvector:
-    image: pgvector/pgvector:pg17
+    # Pin both the pgvector extension version *and* the Postgres major so
+    # the published bench numbers are reproducible — `pg17` alone floats
+    # the extension version. 0.8.0 is the version the bench numbers in
+    # README.md were captured against; bump deliberately when re-running
+    # the full sweep.
+    image: pgvector/pgvector:0.8.0-pg17
     container_name: vdbbench-pgvector
     environment:
       POSTGRES_USER: bench

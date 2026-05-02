@@ -83,7 +83,7 @@ The full sweep of HNSW `ef_search`, IVF `lists`/`probes`, and IVF-PQ `num_partit
 | --- | --- |
 | Embeddings | `sentence-transformers` (bge-small, nomic) |
 | Corpus | BEIR via Hugging Face `datasets` (streaming + judged-aware sampling) |
-| pgvector | Postgres 17 + `pgvector` 0.8 in Docker |
+| pgvector | Postgres 17 + `pgvector` 0.8.0 in Docker (image tag `pgvector/pgvector:0.8.0-pg17`) |
 | Qdrant | Qdrant 1.17 in Docker |
 | LanceDB | embedded (no service) |
 | Chroma | embedded persistent client |
