@@ -88,3 +88,112 @@ jobs:
 
       - name: Run synthetic pipeline smoke
         run: uv run python scripts/smoke_pipeline.py --out smoke-out
+
+  cli-smoke:
+    # Exercises the resolved CLI surface (typer registration, argument
+    # parsing, command wiring) — the synthetic smoke uses the Python
+    # API directly and would miss CLI-only regressions like the
+    # missing --all flag that broke `make bench`.
+    runs-on: ubuntu-latest
+    needs: lint-and-test
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Sync core deps
+        run: uv sync --extra dev --python 3.12
+
+      - name: vdbbench --help / version
+        run: |
+          uv run vdbbench --help
+          uv run vdbbench version
+
+      - name: vdbbench bench --help mentions --all
+        run: |
+          uv run vdbbench bench --help | grep -- "--all"
+
+      - name: Run smoke-only CLI tests
+        run: uv run pytest tests/test_smoke.py -v
+
+  integration-pgvector:
+    # Drive the pgvector adapter through the contract test against a
+    # real Postgres + pgvector service container. Skipped on PRs from
+    # forks (no service-container access); runs on every push to main
+    # and on PRs from same-repo branches.
+    runs-on: ubuntu-latest
+    needs: lint-and-test
+    services:
+      pgvector:
+        image: pgvector/pgvector:0.8.0-pg17
+        env:
+          POSTGRES_USER: bench
+          POSTGRES_PASSWORD: bench
+          POSTGRES_DB: bench
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U bench -d bench"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      PGVECTOR_DSN: postgresql://bench:bench@localhost:5432/bench
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Sync core deps
+        run: uv sync --extra dev --python 3.12
+
+      - name: pgvector contract + integration tests
+        run: |
+          uv run pytest -m integration tests/test_adapters/test_pgvector_integration.py
+          uv run pytest tests/test_adapters/test_contract.py -k pgvector
+
+  integration-qdrant:
+    runs-on: ubuntu-latest
+    needs: lint-and-test
+    services:
+      qdrant:
+        image: qdrant/qdrant:v1.17.0
+        ports:
+          - 6333:6333
+        options: >-
+          --health-cmd "wget --quiet --spider http://localhost:6333/healthz || exit 1"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      QDRANT_URL: http://localhost:6333
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Sync core deps
+        run: uv sync --extra dev --python 3.12
+
+      - name: qdrant contract + integration tests
+        run: |
+          uv run pytest -m integration tests/test_adapters/test_qdrant_integration.py
+          uv run pytest tests/test_adapters/test_contract.py -k qdrant
