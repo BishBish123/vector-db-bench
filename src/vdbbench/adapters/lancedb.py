@@ -30,7 +30,18 @@ from typing import Any, cast
 
 import numpy as np
 
-from vdbbench.adapters.base import IndexStats, IngestStats
+from vdbbench.adapters.base import (
+    IndexStats,
+    IngestStats,
+    OptionalAdapterUnavailableError,
+)
+
+_LANCEDB_INSTALL_HINT = (
+    "LanceDB requires `pip install vdbbench[lance]` and a wheel available "
+    "for your platform (Linux x86_64, ARM64 macOS, or Windows). Intel macOS "
+    "is unsupported by upstream. Install instructions: "
+    "https://lancedb.github.io/lancedb/install/"
+)
 
 _DISTANCE_MAP: dict[str, str] = {
     "cosine": "cosine",
@@ -70,8 +81,11 @@ class LanceDBAdapter:
             if knob in params and int(cast(int | str, params[knob])) <= 0:
                 raise ValueError(f"{knob} must be positive, got {params[knob]!r}")
 
-        import lancedb  # noqa: PLC0415  -- optional import
-        import pyarrow as pa  # noqa: PLC0415
+        try:
+            import lancedb  # noqa: PLC0415  -- optional import
+            import pyarrow as pa  # noqa: PLC0415
+        except ImportError as exc:  # pragma: no cover - exercised in unit test via monkeypatch
+            raise OptionalAdapterUnavailableError(_LANCEDB_INSTALL_HINT) from exc
 
         self._path.mkdir(parents=True, exist_ok=True)
         db = lancedb.connect(self._path)

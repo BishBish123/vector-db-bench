@@ -12,6 +12,22 @@ from typing import Protocol, runtime_checkable
 import numpy as np
 
 
+class OptionalAdapterUnavailableError(ImportError):
+    """An optional adapter's backing wheel is not importable on this host.
+
+    Raised by the lazy-import path inside ``LanceDBAdapter`` /
+    ``ChromaAdapter`` when the underlying package can't be loaded
+    (typically Intel macOS, where neither ships a wheel). The message
+    points at the relevant install instructions so the user knows what
+    to do — earlier revisions surfaced a bare ``ModuleNotFoundError``
+    that named the missing C extension instead of the supported install
+    path.
+
+    Inherits from ``ImportError`` so existing ``except ImportError``
+    handlers still catch it without being rewritten.
+    """
+
+
 @dataclass(frozen=True)
 class IngestStats:
     """How long the bulk-load step took, plus how many vectors landed."""

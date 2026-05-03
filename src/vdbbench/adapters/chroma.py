@@ -29,7 +29,18 @@ from typing import Any
 
 import numpy as np
 
-from vdbbench.adapters.base import IndexStats, IngestStats
+from vdbbench.adapters.base import (
+    IndexStats,
+    IngestStats,
+    OptionalAdapterUnavailableError,
+)
+
+_CHROMA_INSTALL_HINT = (
+    "Chroma requires `pip install vdbbench[chroma]` and an importable "
+    "`chromadb` (which depends on `onnxruntime`). Wheels are available for "
+    "Linux x86_64, ARM64 macOS, and Windows; Intel macOS is unsupported "
+    "upstream. Install instructions: https://docs.trychroma.com/getting-started"
+)
 
 _DISTANCE_MAP: dict[str, str] = {
     "cosine": "cosine",
@@ -63,7 +74,10 @@ class ChromaAdapter:
         if metric not in _DISTANCE_MAP:
             raise ValueError(f"unknown metric {metric!r}; expected one of {list(_DISTANCE_MAP)}")
 
-        import chromadb  # noqa: PLC0415  -- optional import
+        try:
+            import chromadb  # noqa: PLC0415  -- optional import
+        except ImportError as exc:  # pragma: no cover - exercised in unit test via monkeypatch
+            raise OptionalAdapterUnavailableError(_CHROMA_INSTALL_HINT) from exc
 
         self._path.mkdir(parents=True, exist_ok=True)
         client = chromadb.PersistentClient(path=str(self._path))
