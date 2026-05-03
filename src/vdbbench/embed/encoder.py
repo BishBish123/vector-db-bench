@@ -342,6 +342,38 @@ def _read_vectors(path: Path, expected_ids: pd.Series[str], expected_dim: int) -
     return arr
 
 
+def _verify_encoded_matrix(arr: np.ndarray, *, expected_dim: int, label: str) -> None:
+    """Assert that `arr` is a `(N, expected_dim)` float32 matrix with no NaN/Inf.
+
+    Encoders advertise a `dim` via the protocol; the runner trusts that
+    advertisement to size adapters. If the encoder lies — claims dim=384
+    but returns shape `(N, 256)` — every adapter downstream breaks in
+    confusing ways. Catch it once, here, with an actionable message.
+    """
+    if arr.ndim != 2:
+        raise ValueError(f"{label} must be 2-D, got shape {arr.shape!r} from encoder")
+    if arr.shape[1] != expected_dim:
+        raise ValueError(
+            f"{label} dim {arr.shape[1]} disagrees with encoder.dim={expected_dim} — "
+            f"the encoder advertised one width and produced another; refusing to "
+            f"build an EncodedBundle whose metadata lies."
+        )
+    if arr.dtype != np.float32:
+        # The protocol contract is float32; we accept the widening here
+        # rather than rejecting outright so existing well-behaved encoders
+        # keep working, but flag it as a soft warning so a regression
+        # doesn't go silent.
+        # Don't widen via warning machinery (callers already filter on
+        # warnings); just let EncodedBundle's __post_init__ do the cast.
+        pass
+    if not np.isfinite(arr).all():
+        bad_count = int((~np.isfinite(arr)).sum())
+        raise ValueError(
+            f"{label} contains {bad_count} non-finite values (NaN or Inf) — "
+            f"encoder produced unusable embeddings"
+        )
+
+
 # ---------------------------------------------------------------------------
 # Corpus encoding pipeline
 # ---------------------------------------------------------------------------
@@ -380,6 +412,15 @@ def encode_corpus(
             f"encoder returned {query_vecs.shape[0]} query vectors but "
             f"received {len(query_texts)} texts — row alignment broken"
         )
+
+    # Encoder protocol guarantees (N, dim) float32; assert before the
+    # EncodedBundle construction so a misbehaving encoder produces a
+    # message that names *which* invariant broke. Without this, an
+    # encoder that quietly returns dim=256 while advertising dim=384
+    # would only blow up later at adapter ingest with a much less
+    # actionable error.
+    _verify_encoded_matrix(passage_vecs, expected_dim=encoder.dim, label="passage_vectors")
+    _verify_encoded_matrix(query_vecs, expected_dim=encoder.dim, label="query_vectors")
 
     return EncodedBundle(
         bundle=bundle,

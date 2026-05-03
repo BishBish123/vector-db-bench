@@ -146,6 +146,36 @@ class TestEncodeCorpus:
         with pytest.raises(RuntimeError, match="row alignment"):
             encode_corpus(_toy_bundle(), BadEncoder())
 
+    def test_encode_corpus_rejects_wrong_dim_passages(self) -> None:
+        """Encoder advertises dim=N but returns shape (..., M) — fail loud."""
+
+        class LyingEncoder:
+            name = "liar"
+            dim = 16  # advertised
+
+            def encode(self, texts: list[str], batch_size: int = 32) -> np.ndarray:
+                # Actually return half the advertised width.
+                return np.zeros((len(texts), 8), dtype=np.float32)
+
+        with pytest.raises(ValueError, match=r"disagrees with encoder\.dim=16"):
+            encode_corpus(_toy_bundle(), LyingEncoder())
+
+    def test_encode_corpus_rejects_nan_in_output(self) -> None:
+        """An encoder producing NaN/Inf must be caught at encode time, not
+        propagated into adapters where the failure mode is subtler."""
+
+        class NanEncoder:
+            name = "nan"
+            dim = 4
+
+            def encode(self, texts: list[str], batch_size: int = 32) -> np.ndarray:
+                out = np.zeros((len(texts), self.dim), dtype=np.float32)
+                out[0, 0] = float("nan")
+                return out
+
+        with pytest.raises(ValueError, match="non-finite"):
+            encode_corpus(_toy_bundle(), NanEncoder())
+
 
 # ---------------------------------------------------------------------------
 # EncodedBundle invariants and round-trip
