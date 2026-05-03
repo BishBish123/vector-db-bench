@@ -661,6 +661,71 @@ class TestMerge:
         assert a.fingerprint() in lineage
         assert b.fingerprint() in lineage
 
+    def test_merge_preserves_source_metadata(self) -> None:
+        """Per-source provenance keys (hf_repo, split, sample_size, ...) must
+        survive the merge so the merged bundle remembers what went into it.
+        Earlier revisions kept only the lineage fingerprint and silently
+        dropped every other metadata key.
+        """
+        a = CorpusBundle(
+            name="a",
+            passages=pd.DataFrame({"pid": ["p0"], "text": ["x"]}),
+            queries=pd.DataFrame({"qid": ["q0"], "text": ["y"]}),
+            qrels=pd.DataFrame({"qid": ["q0"], "pid": ["p0"], "relevance": [1]}),
+            metadata={"hf_repo": "BeIR/scifact", "split": "test", "sample_size": 100},
+        )
+        b = CorpusBundle(
+            name="b",
+            passages=pd.DataFrame({"pid": ["p1"], "text": ["z"]}),
+            queries=pd.DataFrame({"qid": ["q1"], "text": ["w"]}),
+            qrels=pd.DataFrame({"qid": ["q1"], "pid": ["p1"], "relevance": [1]}),
+            metadata={"hf_repo": "BeIR/scifact", "split": "train", "sample_seed": 42},
+        )
+        merged = a.merge(b)
+        sources = merged.metadata["merged_sources"]
+        assert isinstance(sources, list)
+        assert len(sources) == 2
+        # Each source entry now carries name + fingerprint + the original
+        # metadata blob, not just the fingerprint.
+        for entry in sources:
+            assert isinstance(entry, dict)
+            assert {"name", "fingerprint", "metadata"} <= entry.keys()
+        names = {str(e["name"]) for e in sources}
+        assert names == {"a", "b"}
+        # Reach into the per-source metadata and verify provenance fields
+        # are still there.
+        per_name = {str(e["name"]): e["metadata"] for e in sources}
+        assert per_name["a"]["sample_size"] == 100
+        assert per_name["b"]["sample_seed"] == 42
+        assert per_name["a"]["hf_repo"] == "BeIR/scifact"
+        assert per_name["b"]["split"] == "train"
+
+    def test_merge_lineage_is_order_invariant_with_full_metadata(self) -> None:
+        """Lineage with per-source metadata must still be order-invariant.
+
+        `merged_sources` is sorted by (name, fingerprint) so a.merge(b) and
+        b.merge(a) yield identical metadata blobs and therefore identical
+        merged-bundle fingerprints.
+        """
+        a = CorpusBundle(
+            name="alpha",
+            passages=pd.DataFrame({"pid": ["p0"], "text": ["x"]}),
+            queries=pd.DataFrame({"qid": ["q0"], "text": ["y"]}),
+            qrels=pd.DataFrame({"qid": ["q0"], "pid": ["p0"], "relevance": [1]}),
+            metadata={"hf_repo": "X/a", "split": "test"},
+        )
+        b = CorpusBundle(
+            name="bravo",
+            passages=pd.DataFrame({"pid": ["p1"], "text": ["z"]}),
+            queries=pd.DataFrame({"qid": ["q1"], "text": ["w"]}),
+            qrels=pd.DataFrame({"qid": ["q1"], "pid": ["p1"], "relevance": [1]}),
+            metadata={"hf_repo": "X/b", "split": "train"},
+        )
+        ab = a.merge(b)
+        ba = b.merge(a)
+        assert ab.metadata["merged_sources"] == ba.metadata["merged_sources"]
+        assert ab.fingerprint() == ba.fingerprint()
+
     def test_merge_is_order_invariant(self) -> None:
         # `a.merge(b).fingerprint() == b.merge(a).fingerprint()` whenever
         # the two bundles describe equivalent data. Without this, the

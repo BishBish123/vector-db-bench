@@ -406,11 +406,30 @@ class CorpusBundle:
         # merged bundle's metadata (and therefore its fingerprint) does not
         # depend on which side called `.merge()`.
         merged_name = name if name is not None else "+".join(sorted([self.name, other.name]))
-        sources = sorted([(self.name, self.fingerprint()), (other.name, other.fingerprint())])
+        # Lineage now also captures each source's full metadata blob so
+        # provenance keys (`hf_repo`, `split`, `sample_size`, `sample_seed`,
+        # ...) survive the merge instead of being silently dropped.
+        # Topic is stripped from the per-source metadata snapshot because
+        # it's already represented at the top level after the conflict
+        # check above; including it twice would just be noise.
+        per_source: list[dict[str, object]] = []
+        for src_self, src_other in [(self, other)]:
+            for src in (src_self, src_other):
+                snap = {k: v for k, v in src.metadata.items() if k != "topic"}
+                per_source.append(
+                    {
+                        "name": src.name,
+                        "fingerprint": src.fingerprint(),
+                        "metadata": _jsonable(snap),
+                    }
+                )
+        # Sort by `(name, fingerprint)` so `a.merge(b)` and `b.merge(a)`
+        # produce identical lineage and therefore identical fingerprints.
+        per_source.sort(key=lambda d: (str(d["name"]), str(d["fingerprint"])))
         merged_metadata: dict[str, object] = {
-            "merged_from": [fp for _, fp in sources],
-            "merged_names": [n for n, _ in sources],
-            "merged_sources": [list(pair) for pair in sources],
+            "merged_from": [str(s["fingerprint"]) for s in per_source],
+            "merged_names": [str(s["name"]) for s in per_source],
+            "merged_sources": per_source,
         }
         if merged_topic:
             merged_metadata["topic"] = merged_topic
