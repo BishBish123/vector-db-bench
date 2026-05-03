@@ -126,4 +126,22 @@ Three load-bearing invariants make every run reproducible:
   — behind `pytest.mark.integration`, need real DB containers. Skipped
   by default on developer machines.
 * **CLI smoke** (`tests/test_smoke.py`) — `python -m vdbbench.cli version`
-  works, version metadata lands.
+  works, version metadata lands, `vdbbench bench --help` includes the
+  `--all` flag (so the documented `make bench` reproduction is wired
+  through end-to-end).
+
+## Demo vs full results
+
+`results/demo/` ships in the repo with parquet + `bench_manifest.json`
+from a 5 000-vector synthetic run that finishes in ~30 seconds. It's
+the dataset the README headline numbers and `BLOG.md` story are
+captured against. It is **not** the canonical benchmark.
+
+The full sweep is a 1 M-vector MS-MARCO run produced by `make bench-1m`
+into `results/full/` — too large to commit, and the numbers vary by
+host. The recipe (`prep --dataset msmarco --sample-size 1000000`,
+`bench --all --profile p99`, `plot`) is in the README so the run is
+exactly reproducible. Every published parquet carries a
+`bench_manifest.json` (schema_version=1) with encoder identity,
+adapter versions, and host metadata so a reviewer can verify what
+produced the numbers.

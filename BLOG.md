@@ -1,12 +1,12 @@
 # What a 5K-vector smoke run already tells you about pgvector vs Qdrant
 
-> *Companion blog post for [vector-db-bench](https://github.com/BishBish123/vector-db-bench). The full 1M-vector MS-MARCO sweep is what the README ships with — this post is about what the **smoke run** already reveals, and the methodology pitfalls I found writing it.*
+> *Companion blog post for [vector-db-bench](https://github.com/BishBish123/vector-db-bench). The numbers cited here come from the **demo** run (5 000 synthetic vectors, checked into `results/demo/summary.parquet`); the canonical 1 M-vector MS-MARCO sweep is what `make bench-1m` produces against `results/full/`. This post is about what the demo already reveals, and the methodology pitfalls I found writing it.*
 
 I built a benchmark harness because every "which vector DB should I use?" article I read was either a vendor blog post or a 100-line micro-bench whose corpus, hardware, and tuning weren't documented. The repo is the harness; this post is the story of one specific tradeoff I saw on the very first run.
 
 ## The setup
 
-* **Corpus:** 5 000 synthetic L2-normalized vectors at dim 64 with brute-force ground truth (qrels are top-10 of cosine similarity over the same vectors). This is the smoke run, not the canonical benchmark — for the 100K MS-MARCO numbers, run `make bench-all`.
+* **Corpus:** 5 000 synthetic L2-normalized vectors at dim 64 with brute-force ground truth (qrels are top-10 of cosine similarity over the same vectors). This is the demo run that ships in `results/demo/`, not the canonical benchmark — for the 1 M MS-MARCO numbers run `make bench-1m`.
 * **Hardware:** 2020 Intel MacBook Air, 4 GB allotted to colima Docker.
 * **Adapters:** `pgvector/pgvector:pg17` and `qdrant/qdrant:v1.17.0`, both via the same `BenchSpec(...)` lifecycle (`setup → ingest → build_index → warm-up → search × repeats → teardown`).
 * **Knobs:** HNSW defaults on both. No `ef_search` sweep yet.

@@ -78,7 +78,13 @@ bench: ## Run benchmark across all DBs (pgvector + qdrant via Docker; lancedb/ch
 	$(UV) run vdbbench bench --all
 
 .PHONY: bench-all
-bench-all: prep bench plots ## Full pipeline: prep + bench + plots
+bench-all: prep bench plots ## Demo pipeline: prep + bench + plots (5K-scale by default)
+
+.PHONY: bench-1m
+bench-1m: ## Full 1M MS-MARCO sweep (results/full/summary.parquet; ~hours, no commit)
+	$(UV) run vdbbench prep  --dataset msmarco --sample-size 1000000 --out data/encoded-1m
+	$(UV) run vdbbench bench --encoded data/encoded-1m --out results/full --all --profile p99
+	$(UV) run vdbbench plot  --summary results/full/summary.parquet --out assets/full
 
 .PHONY: plots
 plots: ## Regenerate analysis plots from results/raw.parquet

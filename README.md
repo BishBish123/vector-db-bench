@@ -14,14 +14,16 @@
 Most vector-DB comparisons online are vendor blog posts or synthetic micro-benchmarks. This repo is built so a reviewer can:
 
 1. Read the methodology and find no holes
-2. Run `make bench-all` on a laptop and reproduce the numbers
-3. Download `results/summary.parquet` and re-do the analysis themselves
+2. Run `make bench-all` on a laptop and reproduce the **demo** numbers (and `make bench-1m` for the full sweep)
+3. Re-run the analysis themselves from the published parquet
 
 That's the bar.
 
+> **Demo vs full.** The numbers in this README and the parquet checked into `results/demo/` come from a 5 000-vector synthetic sanity sweep — small enough to ship in the repo and re-run on a laptop in seconds. The canonical full sweep is a 1 M-vector MS-MARCO run produced by `make bench-1m` and persisted to `results/full/summary.parquet` (not committed; the recipe is below). When the README cites "Pareto frontier" or "p95 latency", it means the demo unless explicitly tagged `[full]`.
+
 ## Headline chart (5K-vector demo)
 
-The numbers below come from a 5 000-vector synthetic corpus with brute-force ground truth, run on a 2020 Intel MacBook Air against pgvector pg17 + qdrant 1.17 in Docker. They're a sanity-check of the pipeline, not the canonical benchmark — the full 1M-vector MS-MARCO sweep is what `make bench-all` produces.
+The numbers below come from a 5 000-vector synthetic corpus with brute-force ground truth, run on a 2020 Intel MacBook Air against pgvector pg17 + qdrant 1.17 in Docker. They're a sanity-check of the pipeline, not the canonical benchmark — `make bench-1m` is what produces the full 1 M-vector MS-MARCO sweep.
 
 ![Pareto frontier — recall vs p95 latency](assets/pareto.png)
 
@@ -37,6 +39,8 @@ Notes worth flagging — these are *exactly* the kinds of caveats the blog post 
 
 ## Reproduce
 
+### Demo (the numbers in this README)
+
 ```bash
 git clone https://github.com/BishBish123/vector-db-bench.git
 cd vector-db-bench
@@ -47,24 +51,29 @@ make install
 # 2. Bring up pgvector + qdrant in Docker.
 make up
 
-# 3. Smoke run (what you'd embed in a PR description / blog preview).
+# 3. Demo run — 5 000 synthetic vectors, ~30 seconds end-to-end.
 uv run vdbbench prep   --out data/encoded-demo --dataset synthetic --sample-size 5000 --dim 64
 uv run vdbbench bench  --encoded data/encoded-demo --out results/demo \
                        --pgvector-dsn postgresql://bench:bench@localhost:5433/bench \
                        --qdrant-url http://localhost:6333
 uv run vdbbench plot   --summary results/demo/summary.parquet --out assets
-
-# 4. Full bench (MS-MARCO 100K, ~30–60 min on a laptop).
-uv run vdbbench prep  --dataset msmarco --sample-size 100000
-uv run vdbbench bench --encoded data/encoded --out results \
-                      --pgvector-dsn postgresql://bench:bench@localhost:5433/bench \
-                      --qdrant-url http://localhost:6333 \
-                      --lancedb-path data/lancedb \
-                      --chroma-path data/chroma
-uv run vdbbench plot
 ```
 
-The `--lancedb-path` and `--chroma-path` flags are skipped on Intel macOS (no wheels for `lancedb` / `chromadb`+`onnxruntime`); use the Docker bench image or run on Linux / arm64 macOS for the full four-way comparison.
+`results/demo/summary.parquet` is checked into the repo so a reviewer can run only step 4 (the plot) and inspect the published numbers without bringing services up. `bench_manifest.json` next to it captures encoder identity, adapter versions, and host metadata for the run that produced those numbers.
+
+### Full (1 M MS-MARCO, the canonical benchmark)
+
+The full sweep is reproducible but **not** checked in — the parquet would be too large and the recall numbers are tied to the host the run was performed on. The recipe:
+
+```bash
+uv run vdbbench prep  --dataset msmarco --sample-size 1000000 --out data/encoded-1m
+uv run vdbbench bench --encoded data/encoded-1m --out results/full --all --profile p99
+uv run vdbbench plot  --summary results/full/summary.parquet --out assets/full
+```
+
+`make bench-1m` (planned) is the one-command wrapper. Expect ~6–12 hours wall-clock on a laptop depending on which adapters land — the Pareto sweep over `ef_search` / `probes` / `nprobes` is what eats the time. Persist the resulting `results/full/` tree (parquet + `bench_manifest.json`) when you publish numbers.
+
+The `--lancedb-path` and `--chroma-path` flags (used by `--all`) are skipped on Intel macOS (no wheels for `lancedb` / `chromadb`+`onnxruntime`); use the Docker bench image or run on Linux / arm64 macOS for the full four-way comparison.
 
 ## Methodology
 
