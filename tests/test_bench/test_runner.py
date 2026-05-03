@@ -193,6 +193,41 @@ class TestRunBench:
         # Manifest carries the skipped spec list so the gap is auditable.
         assert "skipped_specs" in result.manifest
 
+    def test_tolerate_failures_skips_psycopg_operational_error(self) -> None:
+        """``psycopg.OperationalError`` does NOT inherit from ``OSError``
+        (MRO: OperationalError -> DatabaseError -> Error -> Exception),
+        so the tolerated-failure tuple has to list it explicitly. Without
+        this, a dead Postgres in ``--all`` mode dumped a full traceback
+        instead of cleanly skipping pgvector. We synthesise the failure
+        from inside an adapter's ``setup`` so we don't need a real
+        Postgres to exercise the codepath.
+        """
+        import psycopg  # noqa: PLC0415
+
+        encoded = _toy_encoded()
+
+        class PgUnreachableAdapter(_MemAdapter):
+            name = "pgvector-fake"
+
+            def setup(self, dim: int, params: dict[str, object]) -> None:
+                # Match the exact subclass psycopg raises on connect failure.
+                raise psycopg.OperationalError(
+                    "connection failed: Connection refused (Errno 61)"
+                )
+
+        good = BenchSpec(adapter=_MemAdapter(), params={"v": "good"}, k=2)
+        bad = BenchSpec(adapter=PgUnreachableAdapter(), params={"v": "bad"}, k=2)
+        result = run_bench(encoded, [bad, good], tolerate_failures=True)
+
+        # The good adapter still runs; the psycopg failure is captured as
+        # a structured skip rather than aborting the run.
+        assert len(result.summary) == 1
+        assert result.summary.iloc[0]["db"] == "mem"
+        assert len(result.skipped) == 1
+        assert result.skipped[0].db == "pgvector-fake"
+        assert result.skipped[0].error_type == "OperationalError"
+        assert "connection failed" in result.skipped[0].reason
+
     def test_tolerate_failures_does_not_swallow_real_bugs(self) -> None:
         """A non-connection error is still a real bug — must propagate
         even in tolerant mode, otherwise we'd mask harness regressions."""

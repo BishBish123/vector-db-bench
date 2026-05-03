@@ -550,7 +550,17 @@ def _bench_impl(
     # point, so a single dead service must not kill the whole run.
     # Single-adapter mode (the user explicitly named one DB) keeps the
     # hard-fail behavior — there's no other adapter to keep going for.
-    result = run_bench(enc, specs, progress=True, tolerate_failures=all_adapters)
+    #
+    # ``out=out`` wires the runner's incremental-write + partial-manifest
+    # path to the CLI: a Ctrl-C mid-run flushes the specs that already
+    # completed with ``partial=True`` stamped in ``bench_manifest.json``
+    # before the exception propagates. Without this, ``out_path`` inside
+    # the runner stayed ``None`` and the documented "Ctrl-C flushes a
+    # partial manifest" behaviour was dead code from the CLI entry.
+    # ``BenchResult.save(out)`` below is still the canonical final write
+    # — it overwrites the per-spec incremental files with the final
+    # ``partial=False`` manifest, so there's no double-write conflict.
+    result = run_bench(enc, specs, progress=True, tolerate_failures=all_adapters, out=out)
     out_path = result.save(out)
     console.print(f"[green]wrote[/] timings + summary to {out_path}")
     n_ran = len(specs) - len(result.skipped)

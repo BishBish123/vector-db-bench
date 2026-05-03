@@ -331,15 +331,67 @@ class BenchResult:
 
 # Connection-class errors we recognise as "adapter unavailable" in
 # tolerant (`--all`) mode. Anything outside this tuple still bubbles —
-# it's a real bug, not a missing service. ``OSError`` covers
-# ``ConnectionError``, ``ConnectionRefusedError``, and the network
-# refused/timed-out cases the real adapter clients raise (psycopg's
-# ``OperationalError`` and qdrant_client's transport errors both
-# inherit from ``OSError`` via the underlying socket / requests stack).
-_TOLERATED_FAILURE_TYPES: tuple[type[BaseException], ...] = (
-    OSError,
-    OptionalAdapterUnavailableError,
-)
+# it's a real bug, not a missing service.
+#
+# ``OSError`` covers stdlib ``ConnectionError`` /
+# ``ConnectionRefusedError`` and any raw socket-level failure surfaced by
+# adapters that don't wrap their transport.
+#
+# Real adapter clients do NOT funnel through ``OSError``; their MROs are:
+#   * ``psycopg.OperationalError`` ->
+#         psycopg.DatabaseError -> psycopg.Error -> Exception
+#   * ``qdrant_client.http.exceptions.ResponseHandlingException`` ->
+#         qdrant_client.http.exceptions.ApiException -> Exception
+#     (this is the wrapper the qdrant client raises on
+#      ``httpx.ConnectError`` / ``httpx.ReadTimeout`` etc.)
+#   * ``httpx.ConnectError`` ->
+#         httpx.NetworkError -> httpx.TransportError ->
+#         httpx.RequestError -> httpx.HTTPError -> Exception
+#
+# So each of those classes has to be added explicitly. We import them
+# lazily — psycopg / qdrant_client / httpx are optional adapter deps,
+# and a stripped install (e.g. tests against the in-memory adapter
+# only) must still import this module.
+def _resolve_tolerated_failure_types() -> tuple[type[BaseException], ...]:
+    """Build the tolerated-failure tuple at import time.
+
+    Each external client lookup is wrapped in a ``try`` so a missing
+    package doesn't break the runner — the matching adapter would
+    already raise ``OptionalAdapterUnavailableError`` (which IS in the
+    tuple) before any of these classes could be the failure mode.
+    """
+    types: list[type[BaseException]] = [OSError, OptionalAdapterUnavailableError]
+    try:
+        import psycopg  # noqa: PLC0415
+
+        types.append(psycopg.OperationalError)
+    except ImportError:  # pragma: no cover - psycopg is a hard dep today
+        pass
+    try:
+        from qdrant_client.http.exceptions import (  # noqa: PLC0415
+            ApiException,
+            ResponseHandlingException,
+        )
+
+        # ResponseHandlingException is what the client raises on
+        # connect-time httpx errors; ApiException is the broader parent
+        # so a future client release that bypasses the wrapper still
+        # lands in the tolerated set.
+        types.extend([ResponseHandlingException, ApiException])
+    except ImportError:  # pragma: no cover - qdrant_client is a hard dep today
+        pass
+    try:
+        import httpx  # noqa: PLC0415
+
+        # httpx.TransportError covers ConnectError, ReadError, ConnectTimeout,
+        # ReadTimeout, etc. — every "the service didn't respond" case.
+        types.append(httpx.TransportError)
+    except ImportError:  # pragma: no cover - httpx ships with qdrant-client
+        pass
+    return tuple(types)
+
+
+_TOLERATED_FAILURE_TYPES: tuple[type[BaseException], ...] = _resolve_tolerated_failure_types()
 
 
 def run_bench(

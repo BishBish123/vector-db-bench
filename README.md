@@ -27,10 +27,12 @@ The numbers below come from a 5 000-vector synthetic corpus with brute-force gro
 
 ![Pareto frontier — recall vs p95 latency](assets/pareto.png)
 
-| DB | Ingest (vps) | p95 latency (ms) | Recall@10 | NDCG@10 | QPS (est.) | Index disk |
+| DB | Ingest (vps) | p95 latency (ms) | Recall@10 | NDCG@10 | QPS (est.) | Pg total relation size |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
 | pgvector (HNSW defaults) | 3 016 | 9 | 0.876 | 0.920 | ~150 | 4.4 MB |
 | qdrant (HNSW defaults) | 4 814 | 14 | 1.000 | 1.000 | ~88 | (mem) |
+
+These numbers come from the published bench host (see `results/demo/bench_manifest.json` for CPU / OS / interpreter); re-running `make bench-demo` overwrites `results/demo/summary.parquet` with your host's numbers — the chart updates, but this README table does not. The "Pg total relation size" column is `pg_total_relation_size` (table + index) for pgvector and 0 for qdrant (HNSW lives in memory).
 
 Numbers regenerated from `results/demo/summary.parquet` against the current code (pgvector connection-reuse + RSS sampling fixes). Earlier drafts of this README quoted pgvector p95 ~57 ms with a "per-query connection overhead" caveat — that caveat is gone because the adapter now reuses a single psycopg connection across the whole `BenchSpec` lifecycle (see [BLOG.md](BLOG.md) for the methodology story).
 
@@ -40,6 +42,21 @@ Notes worth flagging — these are *exactly* the kinds of caveats the blog post 
 - 100 % recall on Qdrant at this scale is expected — HNSW with default `m=16` over 5 000 vectors is essentially exact. pgvector's 0.876 is also fine (HNSW with no `ef_search` tuning).
 
 ## Reproduce
+
+### Prerequisites
+
+- `uv` (the package manager — install via `curl -LsSf https://astral.sh/uv/install.sh | sh`)
+- `docker` + `docker compose` v2 (modern subcommand, not the legacy `docker-compose`)
+- `bash` (the Makefile uses bash; macOS / Linux / WSL2 only)
+
+### Re-plot only (no Docker required)
+
+The committed `results/demo/summary.parquet` is enough to regenerate every
+chart on its own:
+
+```bash
+uv run vdbbench plot --summary results/demo/summary.parquet --out assets
+```
 
 ### Demo (the numbers in this README)
 
@@ -80,7 +97,7 @@ uv run vdbbench bench  --encoded data/encoded-demo --out results/demo \
 uv run vdbbench plot   --summary results/demo/summary.parquet --out assets
 ```
 
-For a larger sweep on the same laptop, `make bench-100k` runs the same pipeline at 100 000 vectors (configurable via `SAMPLE_SIZE`) and writes to `results/100k/`. `make bench-1m` is the canonical full sweep below.
+For a larger sweep on the same laptop, `make bench-100k` runs the pipeline at 100 000 *synthetic* vectors (configurable via `SAMPLE_SIZE`) and writes to `results/100k/` — it's a scale-up smoke test for the harness, not an MS-MARCO run. Only `make bench-1m` switches the corpus to MS-MARCO; that is the canonical full sweep below.
 
 `results/demo/summary.parquet`, the matching `timings.parquet`, and the `bench_manifest.json` from the run that produced them are checked into the repo — a reviewer can run only step 4 (the plot) and inspect the published numbers without bringing services up. The manifest captures encoder identity, adapter versions, encoded-bundle fingerprint, and host metadata so the parquet is auditable, not just present.
 
@@ -94,9 +111,9 @@ uv run vdbbench bench --encoded data/encoded-1m --out results/full --all --profi
 uv run vdbbench plot  --summary results/full/summary.parquet --out assets/full
 ```
 
-`make bench-1m` is the one-command wrapper (defined in the Makefile; `prep --dataset msmarco --sample-size 1000000`, then `bench --all --profile p99`, then `plot`). Expect ~6–12 hours wall-clock on a laptop depending on which adapters land — the Pareto sweep over `ef_search` / `probes` / `nprobes` is what eats the time. Persist the resulting `results/full/` tree (parquet + `bench_manifest.json`) when you publish numbers.
+`make bench-1m` is the one-command wrapper (defined in the Makefile; `prep --dataset msmarco --sample-size 1000000`, then `bench --all --profile p99`, then `plot`). It runs each adapter once with HNSW defaults at the `p99` profile (50 warm-up queries + 5 measured repeats) — not yet a Pareto sweep over `ef_search` / `probes` / `nprobes`; that knob-grid runner is future work (see Methodology below). Wall-clock is dominated by the MS-MARCO encode (~8 GB of HF data + ~400 MB of model weights to download on first run) and the per-adapter ingest + index build over 1 M vectors. Persist the resulting `results/full/` tree (parquet + `bench_manifest.json`) when you publish numbers.
 
-The `--lancedb-path` and `--chroma-path` flags (used by `--all`) are skipped on Intel macOS (no wheels for `lancedb` / `chromadb`+`onnxruntime`); use the Docker bench image or run on Linux / arm64 macOS for the full four-way comparison.
+The `--lancedb-path` and `--chroma-path` flags (used by `--all`) are skipped on Intel macOS (no wheels for `lancedb` / `chromadb`+`onnxruntime`); run on Linux / arm64 macOS / WSL2 for the full four-way comparison.
 
 ## Methodology
 
@@ -108,7 +125,7 @@ The `--lancedb-path` and `--chroma-path` flags (used by `--all`) are skipped on 
 - **Repeats.** Per-(db, params) summary aggregates across `repeats × n_queries` measured timings.
 - **Recall denominator.** The `relevance > 0` qrels are the positives; judged-negative entries (`relevance == 0`) are explicitly excluded from recall and NDCG.
 
-The full sweep of HNSW `ef_search`, IVF `lists`/`probes`, and IVF-PQ `num_partitions` lands in a follow-up commit (the harness plumbs `params` straight to the adapters; the missing piece is a `vdbbench sweep` runner that emits a list of `BenchSpec` values across a knob grid).
+The full sweep of HNSW `ef_search`, IVF `lists`/`probes`, and IVF-PQ `num_partitions` is future work: the harness already plumbs `params` straight to the adapters, so a knob-grid runner (driving `run_bench` over a list of `BenchSpec` values) is the missing piece. Today the supported workflow is to invoke `run_bench` directly from a Python script with the per-knob specs you want to compare; the CLI exposes only the four standalone commands listed in `vdbbench --help` (`prep`, `bench`, `plot`, `version`).
 
 ## Stack
 
@@ -130,7 +147,7 @@ The full sweep of HNSW `ef_search`, IVF `lists`/`probes`, and IVF-PQ `num_partit
 | --- | --- | --- |
 | Linux x86_64 | ✅ all extras | ✅ |
 | macOS arm64 (Apple Silicon) | ✅ all extras | ✅ |
-| macOS x86_64 (Intel) | ✅ core + dev only (`make install-min`) | ⚠️ pgvector + qdrant only — lancedb / chroma need the Docker bench image |
+| macOS x86_64 (Intel) | ✅ core + dev only (`make install-min`) | ⚠️ pgvector + qdrant only — lancedb / chroma require Linux / arm64 macOS / WSL2 (no wheels for Intel macOS) |
 
 Windows is unsupported (`Makefile` uses bash). WSL2 works.
 

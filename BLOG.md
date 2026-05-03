@@ -54,7 +54,7 @@ Three things I'm proud of even at 5K rows:
 
 Look at the methodology section in the README. Look at the parquet files in `results/`. Look at what *was* missing — the un-pooled pgvector connection, the un-sampled RSS, the silent partial-availability behavior of `--all`. Each of those gaps was a real story about a tradeoff you can only see once you've built the rig. The round-1 + round-2 fixes shipped this month closed those specific holes; the next set (an `ef_search` sweep, a 1M-vector MS-MARCO Pareto frontier) is the work the repo is built to do, not the headline.
 
-The headline numbers, when they land, will come with a `MEASURED-ON.md` file documenting the exact hardware, OS, container limits, and software versions. Until then: assume nothing.
+The headline numbers come with a [`MEASURED-ON.md`](MEASURED-ON.md) file documenting the exact hardware, OS, and software versions for each committed run; the machine-readable source of truth lives in `results/<run>/bench_manifest.json`.
 
 ## Reproduce in 10 minutes
 

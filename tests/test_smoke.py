@@ -222,8 +222,9 @@ def _make_fake_run_bench(
         *,
         progress: bool = False,
         tolerate_failures: bool = False,
+        out: object = None,
     ) -> BenchResult:
-        del progress  # signature parity with run_bench; not used in the fake
+        del progress, out  # signature parity with run_bench; not used in the fake
         summary_rows: list[dict[str, object]] = []
         skipped: list[SkippedSpec] = []
         for spec in specs:
@@ -481,8 +482,9 @@ def test_cli_bench_adapter_exact_runs_offline(tmp_path: Path) -> None:
         *,
         progress: bool = False,
         tolerate_failures: bool = False,
+        out: object = None,
     ) -> BenchResult:
-        del progress, tolerate_failures
+        del progress, tolerate_failures, out
         captured["dbs"] = [s.adapter.name for s in specs]
         return BenchResult(
             timings=pd.DataFrame(),
@@ -522,8 +524,9 @@ def test_cli_bench_adapter_memory_alias_resolves_to_exact(tmp_path: Path) -> Non
         *,
         progress: bool = False,
         tolerate_failures: bool = False,
+        out: object = None,
     ) -> BenchResult:
-        del progress, tolerate_failures
+        del progress, tolerate_failures, out
         return BenchResult(
             timings=pd.DataFrame(),
             summary=pd.DataFrame([{"db": s.adapter.name} for s in specs]),
@@ -568,8 +571,9 @@ def test_adapter_selection_excludes_unselected_with_creds(tmp_path: Path) -> Non
         *,
         progress: bool = False,
         tolerate_failures: bool = False,
+        out: object = None,
     ) -> BenchResult:
-        del progress, tolerate_failures
+        del progress, tolerate_failures, out
         captured["dbs"] = [s.adapter.name for s in specs]
         return BenchResult(
             timings=pd.DataFrame(),
@@ -618,8 +622,9 @@ def test_adapter_selection_authoritative_drops_unselected_creds(tmp_path: Path) 
         *,
         progress: bool = False,
         tolerate_failures: bool = False,
+        out: object = None,
     ) -> BenchResult:
-        del progress, tolerate_failures
+        del progress, tolerate_failures, out
         captured["dbs"] = [s.adapter.name for s in specs]
         return BenchResult(
             timings=pd.DataFrame(),
