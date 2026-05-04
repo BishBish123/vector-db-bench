@@ -221,11 +221,22 @@ def plot(
         Path("results/summary.parquet"), help="Path to bench summary parquet."
     ),
     out: Path = typer.Option(Path("assets"), help="Where to write the chart files."),
+    baseline_label: str | None = typer.Option(
+        None,
+        "--baseline-label",
+        help=(
+            "Speedup chart baseline row, matched against the summary's `label` "
+            "column (e.g. 'chroma:default'). Required when the baseline DB "
+            "(chroma if present, else alphabetically-first) has multiple "
+            "configs in the summary; the chart anchors that exact row at 1.0 "
+            "and computes ratios off its p95."
+        ),
+    ),
 ) -> None:
     """Regenerate every standard chart from a bench summary."""
     from vdbbench.plot import plot_all  # noqa: PLC0415
 
-    paths = plot_all(summary, out)
+    paths = plot_all(summary, out, baseline_label=baseline_label)
     for name, (png, svg) in paths.items():
         console.print(f"[green]{name}[/]: {png.name} + {svg.name}")
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from unittest.mock import patch
 
 import pandas as pd
 import pytest
@@ -165,3 +166,120 @@ class TestCharts:
         frontier = _pareto_filter(df)
         assert len(frontier) == 1
         assert float(frontier.iloc[0]["latency_ms_p95"]) == 3.0
+
+
+def _multi_config_summary() -> pd.DataFrame:
+    """Two chroma configs + one qdrant config — a realistic multi-config run."""
+    rows: list[dict[str, object]] = []
+    for label, p95 in (
+        ("chroma:default", 4.0),
+        ("chroma:hnsw-tuned", 8.0),
+    ):
+        rows.append(
+            {
+                "db": "chroma",
+                "label": label,
+                "params_hash": label.split(":", 1)[1],
+                "params_json": "{}",
+                "n_passages": 1000,
+                "n_queries": 100,
+                "dim": 16,
+                "ingest_s": 1.0,
+                "ingest_throughput_vps": 1000.0,
+                "index_s": 0.5,
+                "index_bytes": 1024,
+                "latency_ms_mean": p95 * 0.5,
+                "latency_ms_p50": p95 * 0.4,
+                "latency_ms_p95": p95,
+                "recall_at_k_mean": 0.9,
+                "recall_at_k_p50": 0.9,
+                "ndcg_at_k_mean": 0.85,
+                "qps_estimate": 1000.0 / p95,
+            }
+        )
+    rows.append(
+        {
+            "db": "qdrant",
+            "label": "qdrant:hnsw-default",
+            "params_hash": "qhash",
+            "params_json": "{}",
+            "n_passages": 1000,
+            "n_queries": 100,
+            "dim": 16,
+            "ingest_s": 0.5,
+            "ingest_throughput_vps": 2000.0,
+            "index_s": 0.0,
+            "index_bytes": 2048,
+            "latency_ms_mean": 1.0,
+            "latency_ms_p50": 0.8,
+            "latency_ms_p95": 2.0,
+            "recall_at_k_mean": 0.95,
+            "recall_at_k_p50": 0.95,
+            "ndcg_at_k_mean": 0.92,
+            "qps_estimate": 500.0,
+        }
+    )
+    return pd.DataFrame(rows)
+
+
+class TestSpeedupBaseline:
+    def test_speedup_resolves_single_config_baseline(self, tmp_path: Path) -> None:
+        """One chroma config + one qdrant config — chroma row auto-selected,
+        no `baseline_label` needed."""
+        df = _toy_summary().copy()
+        # Mutate pgvector row to chroma so we have a 1-config baseline DB.
+        df.loc[df["db"] == "pgvector", "db"] = "chroma"
+        df.loc[df["db"] == "chroma", "label"] = "chroma:default"
+        png, svg = plot_speedup_vs_baseline(df, tmp_path, baseline_db="chroma")
+        assert png.exists() and svg.exists()
+
+    def test_speedup_requires_label_with_multi_config_baseline(self, tmp_path: Path) -> None:
+        """Two chroma configs, no baseline_label — must raise with both
+        labels listed so the caller can fix the call."""
+        df = _multi_config_summary()
+        with pytest.raises(ValueError, match="2 configs"):
+            plot_speedup_vs_baseline(df, tmp_path, baseline_db="chroma")
+        # And the error message must list the available labels.
+        with pytest.raises(ValueError, match="chroma:default") as exc:
+            plot_speedup_vs_baseline(df, tmp_path, baseline_db="chroma")
+        assert "chroma:hnsw-tuned" in str(exc.value)
+
+    def test_speedup_baseline_renders_as_one(self, tmp_path: Path) -> None:
+        """The chosen baseline row's bar must be exactly 1.0, not the
+        result of float division of equal numbers (which is fine in
+        practice but loses meaning when the chart is the visual claim).
+        """
+        df = _multi_config_summary()
+        # Inspect the speedups via a stubbed `bar` to capture the values.
+        captured: dict[str, list[float]] = {}
+
+        def fake_bar(_self, _x, heights, **_kwargs):  # type: ignore[no-untyped-def]
+            captured["heights"] = list(heights)
+
+        with patch("matplotlib.axes.Axes.bar", fake_bar):
+            plot_speedup_vs_baseline(
+                df,
+                tmp_path,
+                baseline_db="chroma",
+                baseline_label="chroma:default",
+            )
+        # chroma:default row anchored at 1.0 exactly.
+        labels = df["label"].tolist()
+        baseline_idx = labels.index("chroma:default")
+        assert captured["heights"][baseline_idx] == 1.0
+        # qdrant:hnsw-default — p95 2.0 vs baseline 4.0 -> speedup 2.0.
+        qdrant_idx = labels.index("qdrant:hnsw-default")
+        assert captured["heights"][qdrant_idx] == pytest.approx(2.0)
+
+    def test_speedup_unknown_label_lists_options(self, tmp_path: Path) -> None:
+        """Typo in baseline_label surfaces a list of available labels."""
+        df = _multi_config_summary()
+        with pytest.raises(ValueError, match="not found among rows") as exc:
+            plot_speedup_vs_baseline(
+                df,
+                tmp_path,
+                baseline_db="chroma",
+                baseline_label="chroma:typo",
+            )
+        assert "chroma:default" in str(exc.value)
+        assert "chroma:hnsw-tuned" in str(exc.value)

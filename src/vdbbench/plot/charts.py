@@ -199,21 +199,32 @@ def plot_speedup_vs_baseline(
     out: str | Path,
     *,
     baseline_db: str | None = "chroma",
+    baseline_label: str | None = None,
 ) -> tuple[Path, Path]:
-    """Per-DB speedup over `baseline_db` p95 latency.
+    """Per-DB speedup over a single baseline row's p95 latency.
 
-    Speedup = baseline_p95 / db_p95. >1 means faster than baseline. The
-    baseline itself is shown as a 1.0 reference bar so the chart still
-    makes sense when chroma isn't in the run.
+    Speedup = baseline_p95 / row_p95. >1 means faster than baseline. The
+    baseline row's bar is rendered as exactly 1.0 — it's the canonical
+    reference, so it shouldn't drift by floating-point noise.
 
     Baseline resolution:
 
-    * If `baseline_db` is given and present, use it.
-    * If it is given but missing from the summary, raise — silently
+    * If `baseline_db` is missing from the summary, raise — silently
       falling back to "alphabetically first" used to mask reviewer typos
       and produce a chart titled with a DB that wasn't actually used.
     * If `baseline_db` is `None`, warn and pick the alphabetically-first
       DB so the call still produces a chart for ad-hoc plotting.
+    * If the chosen baseline DB has exactly one config row in the
+      summary, that row is the baseline.
+    * If it has multiple configs (different param hashes), the caller
+      MUST pass ``baseline_label`` to pick one explicitly; otherwise we
+      raise with a list of available labels. The previous code averaged
+      p95 across configs, which leaves no row at 1.0 and makes every
+      ratio meaningless.
+
+    ``baseline_label`` matches against the ``label`` column verbatim
+    (e.g. ``"chroma:default"``) — the same string used as the bar
+    label, so the chart is self-documenting.
     """
     out_path = _ensure_outdir(out)
     available = sorted(set(summary["db"]))
@@ -228,18 +239,47 @@ def plot_speedup_vs_baseline(
             f"defaulting to alphabetically-first DB {baseline_db!r}",
             stacklevel=2,
         )
-    baseline_lat = float(summary[summary["db"] == baseline_db]["latency_ms_p95"].mean())
+
+    baseline_rows = summary[summary["db"] == baseline_db]
+    if baseline_label is not None:
+        matching = baseline_rows[baseline_rows["label"] == baseline_label]
+        if matching.empty:
+            available_labels = sorted(baseline_rows["label"].tolist())
+            raise ValueError(
+                f"baseline_label={baseline_label!r} not found among rows for "
+                f"baseline_db={baseline_db!r}; available labels: {available_labels}"
+            )
+        baseline_row = matching.iloc[0]
+    elif len(baseline_rows) == 1:
+        baseline_row = baseline_rows.iloc[0]
+    else:
+        available_labels = sorted(baseline_rows["label"].tolist())
+        raise ValueError(
+            f"baseline_db={baseline_db!r} has {len(baseline_rows)} configs in the "
+            f"summary; pass baseline_label=<label> to pick one explicitly. "
+            f"Available labels: {available_labels}"
+        )
+    baseline_lat = float(baseline_row["latency_ms_p95"])
+    baseline_row_label = str(baseline_row["label"])
 
     fig, ax = plt.subplots(figsize=(10, 6))
-    speedups = (baseline_lat / summary["latency_ms_p95"]).tolist()
+    # Anchor the baseline bar at exactly 1.0 — float division of equal
+    # values is fine in practice but the canonical reference deserves to
+    # be exact, especially when the chart is the visual claim.
+    speedups: list[float] = []
+    for _, row in summary.iterrows():
+        if str(row["label"]) == baseline_row_label:
+            speedups.append(1.0)
+        else:
+            speedups.append(baseline_lat / float(row["latency_ms_p95"]))
     labels = summary["label"].tolist()
     colors = [_DB_COLORS.get(db, "#666666") for db in summary["db"]]
     ax.bar(range(len(labels)), speedups, color=colors)
     ax.axhline(1.0, color="black", linewidth=0.8, linestyle="--", alpha=0.6)
     ax.set_xticks(range(len(labels)))
     ax.set_xticklabels(labels, rotation=45, ha="right", fontsize=8)
-    ax.set_ylabel(f"Speedup vs {baseline_db} (p95 latency, higher = faster)")
-    ax.set_title(f"p95 latency speedup relative to {baseline_db}")
+    ax.set_ylabel(f"Speedup vs {baseline_row_label} (p95 latency, higher = faster)")
+    ax.set_title(f"p95 latency speedup relative to {baseline_row_label}")
     ax.grid(True, axis="y", linestyle="--", alpha=0.4)
     fig.tight_layout()
     paths = _save_both(fig, out_path, "speedup")
@@ -247,7 +287,12 @@ def plot_speedup_vs_baseline(
     return paths
 
 
-def plot_all(summary_path: str | Path, out: str | Path) -> dict[str, tuple[Path, Path]]:
+def plot_all(
+    summary_path: str | Path,
+    out: str | Path,
+    *,
+    baseline_label: str | None = None,
+) -> dict[str, tuple[Path, Path]]:
     """Read `summary.parquet` and emit every standard chart into `out/`.
 
     `chroma` is the preferred speedup baseline (it's the simplest in-memory
@@ -256,6 +301,10 @@ def plot_all(summary_path: str | Path, out: str | Path) -> dict[str, tuple[Path,
     picks the alphabetically-first DB rather than raising — `plot_all` is
     the "produce everything you can" entry point and should degrade
     gracefully.
+
+    ``baseline_label`` is forwarded to ``plot_speedup_vs_baseline`` and
+    is required when the chosen baseline DB has multiple configs in the
+    summary (different param hashes).
     """
     summary = pd.read_parquet(summary_path)
     if summary.empty:
@@ -298,6 +347,8 @@ def plot_all(summary_path: str | Path, out: str | Path) -> dict[str, tuple[Path,
             name="index_disk",
             log=True,
         ),
-        "speedup": plot_speedup_vs_baseline(summary, out, baseline_db=speedup_baseline),
+        "speedup": plot_speedup_vs_baseline(
+            summary, out, baseline_db=speedup_baseline, baseline_label=baseline_label
+        ),
         "memory_recall": plot_memory_vs_recall(summary, out),
     }
