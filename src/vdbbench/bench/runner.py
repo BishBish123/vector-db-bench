@@ -36,7 +36,12 @@ import numpy as np
 import pandas as pd
 
 from vdbbench import __version__ as _vdbbench_version
-from vdbbench.adapters.base import IndexStats, IngestStats, VectorStoreAdapter
+from vdbbench.adapters.base import (
+    IndexStats,
+    IngestStats,
+    OptionalAdapterUnavailableError,
+    VectorStoreAdapter,
+)
 from vdbbench.embed.encoder import EncodedBundle
 from vdbbench.metrics.retrieval import (
     aggregate,
@@ -170,6 +175,21 @@ class RunSummary:
 
 
 @dataclass(frozen=True)
+class SkippedSpec:
+    """One spec that bench skipped because the adapter wasn't reachable.
+
+    Captured in ``BenchResult.skipped`` whenever ``run_bench`` is invoked
+    with ``tolerate_failures=True``. The default (single-adapter) call
+    path raises instead, so this only matters for ``--all`` runs.
+    """
+
+    label: str
+    db: str
+    reason: str
+    error_type: str
+
+
+@dataclass(frozen=True)
 class BenchResult:
     """Per-query timings + per-(db, params) summary, both ready for parquet.
 
@@ -177,11 +197,17 @@ class BenchResult:
     `_build_manifest()`); `save()` writes it next to the parquet files
     so a reviewer can verify which encoded bundle, encoder, and
     adapter versions produced the numbers.
+
+    ``skipped`` is non-empty when a tolerant run (``--all`` mode) lost
+    adapters to connection errors. The structured rows feed both the
+    CLI summary line and the manifest, so the gap is auditable rather
+    than silent.
     """
 
     timings: pd.DataFrame
     summary: pd.DataFrame
     manifest: dict[str, object] = field(default_factory=dict)
+    skipped: tuple[SkippedSpec, ...] = ()
 
     def save(self, root: str | Path) -> Path:
         out = Path(root)
@@ -200,11 +226,25 @@ class BenchResult:
 # ---------------------------------------------------------------------------
 
 
+# Connection-class errors we recognise as "adapter unavailable" in
+# tolerant (`--all`) mode. Anything outside this tuple still bubbles —
+# it's a real bug, not a missing service. ``OSError`` covers
+# ``ConnectionError``, ``ConnectionRefusedError``, and the network
+# refused/timed-out cases the real adapter clients raise (psycopg's
+# ``OperationalError`` and qdrant_client's transport errors both
+# inherit from ``OSError`` via the underlying socket / requests stack).
+_TOLERATED_FAILURE_TYPES: tuple[type[BaseException], ...] = (
+    OSError,
+    OptionalAdapterUnavailableError,
+)
+
+
 def run_bench(
     encoded: EncodedBundle,
     specs: list[BenchSpec],
     *,
     progress: bool = False,
+    tolerate_failures: bool = False,
 ) -> BenchResult:
     """Run every spec against `encoded` and return per-query + summary tables.
 
@@ -216,9 +256,19 @@ def run_bench(
         # measured queries x repeats
         adapter.teardown()
 
-    A failure in any spec raises and aborts — the bench is meant to be
-    re-runnable, not partially-resilient. Catch upstream if you want to
-    keep going on partial failure.
+    Failure semantics:
+
+    * ``tolerate_failures=False`` (default) — any spec failure raises
+      and aborts the whole run. Right for the single-adapter case where
+      the user explicitly named the DB and a connection error means
+      "fix your service".
+    * ``tolerate_failures=True`` — used by ``--all`` mode. A connection
+      / unavailable-import error on one spec logs a structured skip
+      and the run continues with the remaining specs. Non-connection
+      errors (e.g. an adapter bug) still raise — silencing those would
+      hide real regressions. ``BenchResult.skipped`` carries the
+      structured skip rows so the CLI can surface them and the
+      manifest can record them.
     """
     pids: list[str] = encoded.bundle.passages["pid"].astype(str).tolist()
     qids: list[str] = encoded.bundle.queries["qid"].astype(str).tolist()
@@ -226,85 +276,136 @@ def run_bench(
 
     timing_rows: list[QueryTiming] = []
     summary_rows: list[RunSummary] = []
+    skipped: list[SkippedSpec] = []
 
     bench_started_at = _dt.datetime.now(_dt.UTC)
     for spec in specs:
         if progress:
             print(f"[bench] {spec.display_label()} — setup", flush=True)
-        # Sample RSS of the bench process before setup so callers can read
-        # peak/index RSS as deltas against this baseline. psutil is a
-        # required dep, but we still guard the import so a missing
-        # build can't break the whole run.
-        baseline_rss = _sample_rss_bytes()
-        spec.adapter.setup(encoded.dim, spec.params)
         try:
-            ingest_stats = spec.adapter.ingest(pids, encoded.passage_vectors)
-            index_stats = spec.adapter.build_index()
-            index_rss = _sample_rss_bytes()
-
-            # Warm-up — exercise the cache + kick the JIT path before timing.
-            warmup_n = min(spec.warmup_queries, len(qids))
-            for i in range(warmup_n):
-                spec.adapter.search(encoded.query_vectors[i], spec.k)
-
-            # Measured runs.
-            recalls: list[float] = []
-            ndcgs: list[float] = []
-            latencies_ms: list[float] = []
-            for repeat in range(spec.repeats):
-                for i, qid in enumerate(qids):
-                    qvec = encoded.query_vectors[i]
-                    t0 = time.perf_counter()
-                    retrieved = spec.adapter.search(qvec, spec.k)
-                    latency_ms = (time.perf_counter() - t0) * 1000.0
-                    timing_rows.append(
-                        QueryTiming(
-                            db=spec.adapter.name,
-                            params_hash=spec.params_hash(),
-                            repeat=repeat,
-                            qid=qid,
-                            latency_ms=latency_ms,
-                            retrieved_pids=tuple(retrieved),
-                        )
-                    )
-                    latencies_ms.append(latency_ms)
-                    if qid in qrel_index:
-                        rel = qrel_index[qid]
-                        recalls.append(recall_at_k(retrieved, rel, spec.k))
-                        ndcgs.append(ndcg_at_k(retrieved, rel, spec.k))
-
-            peak_rss = max(_sample_rss_bytes(), index_rss)
-            adapter_mem = 0
-            try:
-                adapter_mem = int(spec.adapter.memory_footprint_bytes())
-            except Exception:  # pragma: no cover - adapter-level instability
-                adapter_mem = 0
-
-            summary_rows.append(
-                _build_summary(
-                    spec,
-                    encoded,
-                    ingest_stats,
-                    index_stats,
-                    recalls,
-                    ndcgs,
-                    latencies_ms,
-                    baseline_rss=baseline_rss,
-                    index_rss=index_rss,
-                    peak_rss=peak_rss,
-                    adapter_memory=adapter_mem,
+            _run_one_spec(
+                spec,
+                encoded,
+                pids,
+                qids,
+                qrel_index,
+                timing_rows,
+                summary_rows,
+            )
+        except _TOLERATED_FAILURE_TYPES as exc:
+            if not tolerate_failures:
+                raise
+            reason = f"{type(exc).__name__}: {exc}"
+            skipped.append(
+                SkippedSpec(
+                    label=spec.display_label(),
+                    db=spec.adapter.name,
+                    reason=str(exc),
+                    error_type=type(exc).__name__,
                 )
             )
-        finally:
-            spec.adapter.teardown()
+            # Structured single-line log — matches the `[bench]` prefix
+            # of the progress line so the skip is grep-able alongside
+            # the runs that succeeded.
+            print(
+                f"[bench] SKIP adapter={spec.adapter.name} "
+                f"label={spec.display_label()} reason={reason}",
+                flush=True,
+            )
     bench_completed_at = _dt.datetime.now(_dt.UTC)
 
     manifest = _build_manifest(encoded, specs, bench_started_at, bench_completed_at)
+    if skipped:
+        manifest["skipped_specs"] = [asdict(s) for s in skipped]
     return BenchResult(
         timings=pd.DataFrame([_qt_to_row(t) for t in timing_rows]),
         summary=pd.DataFrame([asdict(r) for r in summary_rows]),
         manifest=manifest,
+        skipped=tuple(skipped),
     )
+
+
+def _run_one_spec(
+    spec: BenchSpec,
+    encoded: EncodedBundle,
+    pids: list[str],
+    qids: list[str],
+    qrel_index: dict[str, dict[str, int]],
+    timing_rows: list[QueryTiming],
+    summary_rows: list[RunSummary],
+) -> None:
+    """Drive a single spec through the full lifecycle.
+
+    Extracted so tolerant mode can wrap exactly the per-spec scope in
+    try/except without nesting the loop body. Mutates the shared
+    timing / summary lists in place — keeping the caller's pattern.
+    """
+    # Sample RSS of the bench process before setup so callers can read
+    # peak/index RSS as deltas against this baseline. psutil is a
+    # required dep, but we still guard the import so a missing
+    # build can't break the whole run.
+    baseline_rss = _sample_rss_bytes()
+    spec.adapter.setup(encoded.dim, spec.params)
+    try:
+        ingest_stats = spec.adapter.ingest(pids, encoded.passage_vectors)
+        index_stats = spec.adapter.build_index()
+        index_rss = _sample_rss_bytes()
+
+        # Warm-up — exercise the cache + kick the JIT path before timing.
+        warmup_n = min(spec.warmup_queries, len(qids))
+        for i in range(warmup_n):
+            spec.adapter.search(encoded.query_vectors[i], spec.k)
+
+        # Measured runs.
+        recalls: list[float] = []
+        ndcgs: list[float] = []
+        latencies_ms: list[float] = []
+        for repeat in range(spec.repeats):
+            for i, qid in enumerate(qids):
+                qvec = encoded.query_vectors[i]
+                t0 = time.perf_counter()
+                retrieved = spec.adapter.search(qvec, spec.k)
+                latency_ms = (time.perf_counter() - t0) * 1000.0
+                timing_rows.append(
+                    QueryTiming(
+                        db=spec.adapter.name,
+                        params_hash=spec.params_hash(),
+                        repeat=repeat,
+                        qid=qid,
+                        latency_ms=latency_ms,
+                        retrieved_pids=tuple(retrieved),
+                    )
+                )
+                latencies_ms.append(latency_ms)
+                if qid in qrel_index:
+                    rel = qrel_index[qid]
+                    recalls.append(recall_at_k(retrieved, rel, spec.k))
+                    ndcgs.append(ndcg_at_k(retrieved, rel, spec.k))
+
+        peak_rss = max(_sample_rss_bytes(), index_rss)
+        adapter_mem = 0
+        try:
+            adapter_mem = int(spec.adapter.memory_footprint_bytes())
+        except Exception:  # pragma: no cover - adapter-level instability
+            adapter_mem = 0
+
+        summary_rows.append(
+            _build_summary(
+                spec,
+                encoded,
+                ingest_stats,
+                index_stats,
+                recalls,
+                ndcgs,
+                latencies_ms,
+                baseline_rss=baseline_rss,
+                index_rss=index_rss,
+                peak_rss=peak_rss,
+                adapter_memory=adapter_mem,
+            )
+        )
+    finally:
+        spec.adapter.teardown()
 
 
 def _build_manifest(

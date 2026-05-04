@@ -168,6 +168,60 @@ class TestRunBench:
         with pytest.raises(RuntimeError, match="simulated failure"):
             run_bench(encoded, [spec])
 
+    def test_tolerate_failures_skips_unreachable_adapter(self) -> None:
+        """`--all` mode wraps each spec; a connection error on one spec
+        is logged as a structured skip and the run continues."""
+        encoded = _toy_encoded()
+
+        class UnreachableAdapter(_MemAdapter):
+            name = "unreachable"
+
+            def setup(self, dim: int, params: dict[str, object]) -> None:
+                raise ConnectionRefusedError("connection refused: no service on :5433")
+
+        good = BenchSpec(adapter=_MemAdapter(), params={"v": "good"}, k=2)
+        bad = BenchSpec(adapter=UnreachableAdapter(), params={"v": "bad"}, k=2)
+        result = run_bench(encoded, [bad, good], tolerate_failures=True)
+        # Good adapter ran; bad adapter is in skipped.
+        assert len(result.summary) == 1
+        assert result.summary.iloc[0]["db"] == "mem"
+        assert len(result.skipped) == 1
+        assert result.skipped[0].db == "unreachable"
+        assert result.skipped[0].error_type == "ConnectionRefusedError"
+        assert "connection refused" in result.skipped[0].reason
+        # Manifest carries the skipped spec list so the gap is auditable.
+        assert "skipped_specs" in result.manifest
+
+    def test_tolerate_failures_does_not_swallow_real_bugs(self) -> None:
+        """A non-connection error is still a real bug — must propagate
+        even in tolerant mode, otherwise we'd mask harness regressions."""
+        encoded = _toy_encoded()
+
+        class BuggyAdapter(_MemAdapter):
+            name = "buggy"
+
+            def build_index(self) -> IndexStats:
+                raise RuntimeError("real bug, not a missing service")
+
+        spec = BenchSpec(adapter=BuggyAdapter(), k=2)
+        with pytest.raises(RuntimeError, match="real bug"):
+            run_bench(encoded, [spec], tolerate_failures=True)
+
+    def test_tolerate_failures_off_propagates_connection_error(self) -> None:
+        """Default mode (single-adapter run) hard-fails on connection
+        errors — there's no other adapter to keep going for."""
+        encoded = _toy_encoded()
+
+        class UnreachableAdapter(_MemAdapter):
+            name = "unreachable"
+
+            def setup(self, dim: int, params: dict[str, object]) -> None:
+                raise ConnectionRefusedError("nope")
+
+        spec = BenchSpec(adapter=UnreachableAdapter(), k=2)
+        with pytest.raises(ConnectionRefusedError):
+            run_bench(encoded, [spec])
+
     def test_save_writes_parquet(self, tmp_path: Path) -> None:
         encoded = _toy_encoded()
         result = run_bench(encoded, [BenchSpec(adapter=_MemAdapter(), k=2)])

@@ -18,6 +18,41 @@ app = typer.Typer(
 console = Console()
 
 
+def _apply_all_defaults(
+    pgvector_dsn: str | None,
+    qdrant_url: str | None,
+    lancedb_path: Path | None,
+    chroma_path: Path | None,
+) -> tuple[str | None, str | None, Path | None, Path | None]:
+    """Populate the per-adapter knobs that `--all` should default in.
+
+    Service adapters (pgvector / qdrant) get the standard local URLs.
+    Embedded adapters (lancedb / chroma) only get a path when the wheel
+    is actually importable on the host — otherwise the user would see
+    a confusing ImportError instead of a "skipped" message. Explicit
+    caller values still win.
+    """
+    if pgvector_dsn is None:
+        pgvector_dsn = "postgresql://bench:bench@localhost:5433/bench"
+    if qdrant_url is None:
+        qdrant_url = "http://localhost:6333"
+    if lancedb_path is None:
+        try:
+            import lancedb  # noqa: F401, PLC0415
+
+            lancedb_path = Path("data/lancedb")
+        except ImportError:
+            console.print("[yellow]--all:[/] skipping lancedb (no wheel for this platform)")
+    if chroma_path is None:
+        try:
+            import chromadb  # noqa: F401, PLC0415
+
+            chroma_path = Path("data/chroma")
+        except ImportError:
+            console.print("[yellow]--all:[/] skipping chroma (no wheel for this platform)")
+    return pgvector_dsn, qdrant_url, lancedb_path, chroma_path
+
+
 @app.command()
 def version() -> None:
     """Print the installed vdbbench version."""
@@ -121,30 +156,10 @@ def bench(
     from vdbbench.bench import BenchSpec, run_bench  # noqa: PLC0415
     from vdbbench.embed import load_encoded_bundle  # noqa: PLC0415
 
-    # `--all` populates the per-adapter knobs the caller didn't set so the
-    # default reproduces the README pipeline. Explicit flags still win.
     if all_adapters:
-        if pgvector_dsn is None:
-            pgvector_dsn = "postgresql://bench:bench@localhost:5433/bench"
-        if qdrant_url is None:
-            qdrant_url = "http://localhost:6333"
-        # Embedded adapters: only enable when the wheel is actually
-        # importable on the host — otherwise the user gets a confusing
-        # ImportError instead of a "skipped" message.
-        if lancedb_path is None:
-            try:
-                import lancedb  # noqa: F401, PLC0415
-
-                lancedb_path = Path("data/lancedb")
-            except ImportError:
-                console.print("[yellow]--all:[/] skipping lancedb (no wheel for this platform)")
-        if chroma_path is None:
-            try:
-                import chromadb  # noqa: F401, PLC0415
-
-                chroma_path = Path("data/chroma")
-            except ImportError:
-                console.print("[yellow]--all:[/] skipping chroma (no wheel for this platform)")
+        pgvector_dsn, qdrant_url, lancedb_path, chroma_path = _apply_all_defaults(
+            pgvector_dsn, qdrant_url, lancedb_path, chroma_path
+        )
 
     enc = load_encoded_bundle(encoded)
     specs: list[BenchSpec] = []
@@ -210,9 +225,26 @@ def bench(
         raise typer.Exit(code=2)
 
     console.print(f"[green]running[/] {len(specs)} specs against {enc.bundle.name}")
-    result = run_bench(enc, specs, progress=True)
+    # `--all` is the "best-effort across whatever's running" entry
+    # point, so a single dead service must not kill the whole run.
+    # Single-adapter mode (the user explicitly named one DB) keeps the
+    # hard-fail behavior — there's no other adapter to keep going for.
+    result = run_bench(enc, specs, progress=True, tolerate_failures=all_adapters)
     out_path = result.save(out)
     console.print(f"[green]wrote[/] timings + summary to {out_path}")
+    n_ran = len(specs) - len(result.skipped)
+    if result.skipped:
+        for skip in result.skipped:
+            console.print(
+                f"[yellow]skipped[/] {skip.label} ({skip.error_type}): {skip.reason}"
+            )
+        console.print(
+            f"[yellow]bench --all summary:[/] {n_ran}/{len(specs)} adapters ran, "
+            f"{len(result.skipped)} skipped"
+        )
+    if all_adapters and n_ran == 0:
+        console.print("[red]bench --all:[/] every adapter failed; exiting non-zero")
+        raise typer.Exit(code=1)
 
 
 @app.command()
