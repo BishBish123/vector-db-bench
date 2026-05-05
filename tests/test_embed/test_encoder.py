@@ -294,6 +294,45 @@ class TestSaveLoad:
         manifest = json.loads((out / "manifest.json").read_text())
         assert manifest["schema_version"] == ENCODED_MANIFEST_SCHEMA_VERSION
 
+    def test_load_uses_memory_map(self, tmp_path: Path) -> None:
+        """Vector reads pass `memory_map=True` to pyarrow so the parquet's
+        data pages are mmap'd instead of copied into a fresh buffer.
+        Disk-resident case is the common one; the network-FS slowdown
+        is documented in the loader comment.
+        """
+        from unittest.mock import patch  # noqa: PLC0415
+
+        import pyarrow.parquet as pq  # noqa: PLC0415
+
+        bundle = _toy_bundle()
+        encoded = encode_corpus(bundle, FakeEncoder(dim=8))
+        out = encoded.save(tmp_path / "encoded")
+
+        original = pq.read_table
+        captured: list[tuple[Path, dict[str, object]]] = []
+
+        def spy(path: object, *args: object, **kwargs: object) -> object:
+            captured.append((Path(str(path)), dict(kwargs)))
+            return original(path, *args, **kwargs)
+
+        with patch("vdbbench.embed.encoder.pq.read_table", spy):
+            load_encoded_bundle(out)
+
+        # Only the *vector* parquet reads (passages.parquet / queries.parquet
+        # at the encoded-bundle root) are expected to opt into memory_map;
+        # corpus reads go through pandas and aren't load-bearing here.
+        vector_calls = [
+            kwargs
+            for path, kwargs in captured
+            if path.name in {"passages.parquet", "queries.parquet"}
+            and path.parent == out
+        ]
+        assert vector_calls, "expected pq.read_table to be called for vector files"
+        for call_kwargs in vector_calls:
+            assert call_kwargs.get("memory_map") is True, (
+                f"vector pq.read_table was called without memory_map=True: {call_kwargs}"
+            )
+
     def test_load_rejects_unknown_schema_version(self, tmp_path: Path) -> None:
         """An encoded-bundle manifest with a future/unknown schema_version
         must raise — silently mis-parsing would attach the wrong vector

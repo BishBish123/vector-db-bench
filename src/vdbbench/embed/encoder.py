@@ -304,7 +304,15 @@ def _write_vectors(vecs: np.ndarray, ids: pd.Series[str], path: Path) -> None:
 
 
 def _read_vectors(path: Path, expected_ids: pd.Series[str], expected_dim: int) -> np.ndarray:
-    table = pq.read_table(path)  # type: ignore[no-untyped-call]
+    # `memory_map=True` tells Arrow to mmap the parquet's data pages
+    # rather than copying them into a fresh buffer on read. Faster and
+    # cheaper for the disk-resident case the bench actually hits — we
+    # zero-copy into NumPy below, so the mmap'd buffer stays live as
+    # long as the returned array does. Tradeoff: on a network filesystem
+    # (NFS / SMB) mmap can be slower than a streaming read because every
+    # page fault round-trips. The encoded bundle is meant to live on
+    # local disk, so the local-disk win is what we optimize for.
+    table = pq.read_table(path, memory_map=True)  # type: ignore[no-untyped-call]
     ids = table.column("id").to_pylist()
     if list(expected_ids) != ids:
         raise ValueError(
