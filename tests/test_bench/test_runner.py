@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import time
 from pathlib import Path
+from unittest.mock import patch
 
 import numpy as np
 import pandas as pd
 import pytest
 
 from vdbbench.adapters.base import IndexStats, IngestStats
-from vdbbench.bench.runner import BenchSpec, run_bench
+from vdbbench.bench.runner import BenchSpec, _PeakRssTracker, run_bench
 from vdbbench.corpus.bundle import CorpusBundle
 from vdbbench.embed.encoder import EncodedBundle, FakeEncoder, encode_corpus
 
@@ -307,6 +308,66 @@ class TestRunBench:
             "adapter_memory_bytes",
         ):
             assert col in round_tripped.columns, f"summary parquet missing {col!r}"
+
+    def test_rss_baseline_subtracted(self) -> None:
+        """`peak_rss_bytes` is reported as a delta against baseline_rss_bytes,
+        not the raw RSS — so the chart shows adapter-attributable memory,
+        not the constant Python interpreter / numpy / pandas footprint.
+        """
+        encoded = _toy_encoded()
+
+        # Synthetic RSS sequence: baseline = 1_000_000_000; every later
+        # sample is exactly +5_000_000 above baseline so the expected
+        # delta is unambiguous regardless of how many checkpoints fire.
+        rss_iter = iter([1_000_000_000] + [1_005_000_000] * 32)
+
+        def fake_sample(*, force_gc: bool = False) -> int:
+            return next(rss_iter)
+
+        with patch("vdbbench.bench.runner._sample_rss_bytes", fake_sample):
+            result = run_bench(encoded, [BenchSpec(adapter=_MemAdapter(), k=2)])
+        row = result.summary.iloc[0]
+        assert int(row["baseline_rss_bytes"]) == 1_000_000_000
+        # Reported peak is post-baseline-subtraction; raw RSS at 1.005GB
+        # should land as 5_000_000 in the column.
+        assert int(row["peak_rss_bytes"]) == 5_000_000
+        # `index_rss_bytes` is also baseline-subtracted (it's the running
+        # delta returned by the tracker after build_index).
+        assert int(row["index_rss_bytes"]) == 5_000_000
+
+
+class TestPeakRssTracker:
+    def test_peak_rss_only_increases(self) -> None:
+        """Multiple samples with descending values — peak holds the max so
+        a transient spike isn't lost when memory drops on the next sample.
+        """
+        rss_iter = iter([1_100, 1_050, 1_000, 1_080])
+
+        def fake_sample(*, force_gc: bool = False) -> int:
+            return next(rss_iter)
+
+        with patch("vdbbench.bench.runner._sample_rss_bytes", fake_sample):
+            tracker = _PeakRssTracker(baseline=1_000)
+            tracker.observe()  # delta = 100
+            tracker.observe()  # delta = 50
+            tracker.observe()  # delta = 0
+            tracker.observe()  # delta = 80
+        # Peak is the max delta (100), not the latest sample's delta.
+        assert tracker.peak == 100
+
+    def test_peak_rss_clamps_negative_to_zero(self) -> None:
+        """If a sample drops below baseline (Python freed pages mid-bench),
+        the reported delta is 0 — never negative."""
+        rss_iter = iter([900])
+
+        def fake_sample(*, force_gc: bool = False) -> int:
+            return next(rss_iter)
+
+        with patch("vdbbench.bench.runner._sample_rss_bytes", fake_sample):
+            tracker = _PeakRssTracker(baseline=1_000)
+            delta = tracker.observe()
+        assert delta == 0
+        assert tracker.peak == 0
 
     def test_latency_records_actual_time(self) -> None:
         """Latency must be measured per query, not zero."""

@@ -136,12 +136,18 @@ class RunSummary:
     """One row in the per-(db, params) summary table.
 
     Memory columns:
-      * ``baseline_rss_bytes`` — RSS of the bench process before setup.
+      * ``baseline_rss_bytes`` — RSS of the bench process **before** any
+        adapter work. Captures the constant Python interpreter / numpy /
+        pandas footprint so it can be subtracted out.
       * ``index_rss_bytes`` — RSS after build_index returned (so embedded
         adapters' index footprint is included; service adapters report
-        only the harness's own growth).
-      * ``peak_rss_bytes`` — RSS sampled after the measured queries
-        finished. For long-running specs this is the most useful number.
+        only the harness's own growth). Already baseline-subtracted —
+        this is the adapter-attributable delta, not the raw RSS.
+      * ``peak_rss_bytes`` — running max of the baseline-subtracted RSS
+        across every phase (setup, ingest, build_index, warm-up,
+        measured queries). The previous three-checkpoint version missed
+        transient spikes between phases and reported the constant Python
+        overhead alongside the adapter's own growth.
       * ``adapter_memory_bytes`` — what the adapter itself reports via
         ``memory_footprint_bytes()``. Some adapters return 0 (server-side
         memory is not meaningful per-table); kept here so a reviewer can
@@ -340,21 +346,26 @@ def _run_one_spec(
     try/except without nesting the loop body. Mutates the shared
     timing / summary lists in place — keeping the caller's pattern.
     """
-    # Sample RSS of the bench process before setup so callers can read
-    # peak/index RSS as deltas against this baseline. psutil is a
-    # required dep, but we still guard the import so a missing
-    # build can't break the whole run.
-    baseline_rss = _sample_rss_bytes()
+    # Baseline RSS — the constant Python interpreter / numpy / pandas
+    # footprint that's already loaded before any adapter work. Every
+    # subsequent sample is reported as a delta against this so the
+    # numbers in summary.parquet are "adapter-attributable RSS", not
+    # "the whole bench process".
+    baseline_rss = _sample_rss_bytes(force_gc=True)
+    peak_tracker = _PeakRssTracker(baseline=baseline_rss)
     spec.adapter.setup(encoded.dim, spec.params)
+    peak_tracker.observe()  # post-setup
     try:
         ingest_stats = spec.adapter.ingest(pids, encoded.passage_vectors)
+        peak_tracker.observe()  # post-ingest
         index_stats = spec.adapter.build_index()
-        index_rss = _sample_rss_bytes()
+        index_rss_delta = peak_tracker.observe()  # post-index_build
 
         # Warm-up — exercise the cache + kick the JIT path before timing.
         warmup_n = min(spec.warmup_queries, len(qids))
         for i in range(warmup_n):
             spec.adapter.search(encoded.query_vectors[i], spec.k)
+        peak_tracker.observe()  # post-warm-up
 
         # Measured runs.
         recalls: list[float] = []
@@ -382,7 +393,7 @@ def _run_one_spec(
                     recalls.append(recall_at_k(retrieved, rel, spec.k))
                     ndcgs.append(ndcg_at_k(retrieved, rel, spec.k))
 
-        peak_rss = max(_sample_rss_bytes(), index_rss)
+        peak_tracker.observe()  # post-measured-queries
         adapter_mem = 0
         try:
             adapter_mem = int(spec.adapter.memory_footprint_bytes())
@@ -399,13 +410,40 @@ def _run_one_spec(
                 ndcgs,
                 latencies_ms,
                 baseline_rss=baseline_rss,
-                index_rss=index_rss,
-                peak_rss=peak_rss,
+                index_rss=index_rss_delta,
+                peak_rss=peak_tracker.peak,
                 adapter_memory=adapter_mem,
             )
         )
     finally:
         spec.adapter.teardown()
+
+
+class _PeakRssTracker:
+    """Running max of baseline-subtracted RSS across pipeline phases.
+
+    Three checkpoints (before-setup, after-index, after-queries) miss
+    transient spikes — e.g. an HNSW build that frees pages before the
+    next sample lands. ``observe()`` is called after each phase and
+    returns the current delta; ``peak`` is the max across every call.
+    Values are clamped at 0 so a transient drop below baseline (Python
+    freeing pages mid-bench) doesn't show up as a negative footprint.
+    """
+
+    def __init__(self, *, baseline: int) -> None:
+        self._baseline = baseline
+        self._peak = 0
+
+    def observe(self) -> int:
+        """Take a sample, update the running peak, return the current delta."""
+        sample = _sample_rss_bytes(force_gc=True)
+        delta = max(sample - self._baseline, 0)
+        self._peak = max(self._peak, delta)
+        return delta
+
+    @property
+    def peak(self) -> int:
+        return self._peak
 
 
 def _build_manifest(
@@ -523,13 +561,23 @@ def _qt_to_row(qt: QueryTiming) -> dict[str, object]:
     }
 
 
-def _sample_rss_bytes() -> int:
+def _sample_rss_bytes(*, force_gc: bool = False) -> int:
     """Best-effort RSS sample for the bench process.
 
     psutil is a required dep, but we keep the import lazy + defensive so
     a stripped install can't break the whole run. Returns 0 on failure
     so the column stays well-typed in the parquet output.
+
+    ``force_gc=True`` runs ``gc.collect()`` before the sample. We use it
+    on every checkpoint so deferred garbage doesn't show up as adapter
+    growth in the running peak — slower than a raw sample, but the
+    handful of collects per spec is invisible alongside ingest /
+    index_build / query phases.
     """
+    if force_gc:
+        import gc  # noqa: PLC0415
+
+        gc.collect()
     try:
         import psutil  # noqa: PLC0415
 

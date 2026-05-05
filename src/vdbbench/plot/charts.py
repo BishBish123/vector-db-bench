@@ -119,12 +119,18 @@ def plot_pareto_frontier(summary: pd.DataFrame, out: str | Path) -> tuple[Path, 
 
 
 def plot_memory_vs_recall(summary: pd.DataFrame, out: str | Path) -> tuple[Path, Path]:
-    """Scatter plot: peak RSS (y) vs recall@k mean (x), one mark per (db, params).
+    """Scatter plot: adapter peak RSS (y) vs recall@k mean (x), one mark per (db, params).
 
-    Honest companion to ``plot_pareto_frontier`` for the latency-vs-memory
-    tradeoff. Falls back gracefully when memory columns are missing or
-    all zero (e.g. older summaries from before memory sampling landed)
-    by emitting an empty axes with an annotation, so ``plot_all`` doesn't
+    The y-axis is the bench harness's running peak of baseline-subtracted
+    RSS — i.e. memory the adapter caused on top of the constant Python /
+    numpy / pandas footprint that's already loaded before any adapter
+    work. Earlier revisions plotted the raw RSS, which lumped that
+    constant overhead in with the adapter and made small differences
+    visually meaningless.
+
+    Falls back gracefully when memory columns are missing or all zero
+    (e.g. older summaries from before memory sampling landed) by
+    emitting an empty axes with an annotation, so ``plot_all`` doesn't
     have to gate the call.
     """
     out_path = _ensure_outdir(out)
@@ -151,9 +157,9 @@ def plot_memory_vs_recall(summary: pd.DataFrame, out: str | Path) -> tuple[Path,
                 s=60,
             )
         ax.set_xlabel("Recall@k (mean)")
-        ax.set_ylabel("Peak RSS (MiB)")
+        ax.set_ylabel("Adapter peak RSS, baseline-subtracted (MiB)")
         ax.grid(True, linestyle="--", alpha=0.4)
-        ax.set_title("Memory vs recall — bench-process peak RSS per (db, params)")
+        ax.set_title("Memory vs recall — adapter peak RSS per (db, params)")
         ax.legend()
     fig.tight_layout()
     paths = _save_both(fig, out_path, "memory_recall")
