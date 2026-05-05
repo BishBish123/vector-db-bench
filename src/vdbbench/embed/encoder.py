@@ -19,7 +19,12 @@ import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from vdbbench.corpus.bundle import CorpusBundle
+from vdbbench.corpus.bundle import CorpusBundle, IncompatibleManifestError
+
+# Bumped any time the encoded-bundle manifest schema changes in a way
+# readers care about. See ``docs/adr-005-manifest-schema-versioning.md``
+# for the bumping procedure.
+ENCODED_MANIFEST_SCHEMA_VERSION: int = 1
 
 
 @runtime_checkable
@@ -194,6 +199,7 @@ class EncodedBundle:
         from vdbbench.corpus.bundle import _jsonable  # noqa: PLC0415
 
         manifest = {
+            "schema_version": ENCODED_MANIFEST_SCHEMA_VERSION,
             "encoder_name": self.encoder_name,
             "dim": self.dim,
             "n_passages": int(self.bundle.n_passages),
@@ -230,7 +236,20 @@ def load_encoded_bundle(root: str | Path) -> EncodedBundle:
     """
     root_path = Path(root)
     bundle = CorpusBundle.load(root_path / "corpus")
-    manifest = json.loads((root_path / "manifest.json").read_text())
+    manifest_path = root_path / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+
+    # Pre-versioning manifests (no `schema_version` key) are treated as
+    # v1 — they happen to be compatible with v1's reader. A mismatched
+    # version means the bundle was written by a vdbbench whose layout
+    # this loader doesn't understand; refuse rather than mis-parse.
+    version = int(manifest.get("schema_version", ENCODED_MANIFEST_SCHEMA_VERSION))
+    if version != ENCODED_MANIFEST_SCHEMA_VERSION:
+        raise IncompatibleManifestError(
+            f"encoded bundle manifest at {manifest_path} has schema_version="
+            f"{version}; this loader expects {ENCODED_MANIFEST_SCHEMA_VERSION}. "
+            f"Regenerate the bundle or use a vdbbench release that matches."
+        )
 
     expected_fp = manifest.get("bundle_fingerprint")
     if expected_fp and expected_fp != bundle.fingerprint():

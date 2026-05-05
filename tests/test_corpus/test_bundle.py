@@ -9,7 +9,11 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from vdbbench.corpus.bundle import CorpusBundle
+from vdbbench.corpus.bundle import (
+    CORPUS_MANIFEST_SCHEMA_VERSION,
+    CorpusBundle,
+    IncompatibleManifestError,
+)
 
 
 def _toy_bundle() -> CorpusBundle:
@@ -466,6 +470,40 @@ class TestRoundtrip:
     def test_load_missing_manifest(self, tmp_path: Path) -> None:
         with pytest.raises(FileNotFoundError):
             CorpusBundle.load(tmp_path)
+
+    def test_save_includes_schema_version(self, tmp_path: Path) -> None:
+        """Every fresh save stamps the current schema_version into the
+        manifest so future loaders can branch on the format."""
+        bundle = _toy_bundle()
+        root = bundle.save(tmp_path / "corpus")
+        manifest = json.loads((root / "manifest.json").read_text())
+        assert manifest["schema_version"] == CORPUS_MANIFEST_SCHEMA_VERSION
+
+    def test_load_rejects_unknown_schema_version(self, tmp_path: Path) -> None:
+        """A manifest whose schema_version doesn't match the loader's must
+        raise IncompatibleManifestError — silently mis-parsing a future
+        format would produce subtly wrong data."""
+        bundle = _toy_bundle()
+        root = bundle.save(tmp_path / "corpus")
+        manifest_path = root / "manifest.json"
+        manifest = json.loads(manifest_path.read_text())
+        manifest["schema_version"] = 99
+        manifest_path.write_text(json.dumps(manifest))
+        with pytest.raises(IncompatibleManifestError, match="schema_version=99"):
+            CorpusBundle.load(root)
+
+    def test_load_accepts_pre_versioning_manifest(self, tmp_path: Path) -> None:
+        """A manifest with no schema_version key (older bundle written
+        before the field existed) is treated as v1 — gratuitously
+        breaking those would lose users' on-disk corpora."""
+        bundle = _toy_bundle()
+        root = bundle.save(tmp_path / "corpus")
+        manifest_path = root / "manifest.json"
+        manifest = json.loads(manifest_path.read_text())
+        del manifest["schema_version"]
+        manifest_path.write_text(json.dumps(manifest))
+        loaded = CorpusBundle.load(root)
+        assert loaded.fingerprint() == bundle.fingerprint()
 
 
 class TestSliceFraction:

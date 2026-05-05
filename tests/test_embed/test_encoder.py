@@ -9,8 +9,9 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from vdbbench.corpus.bundle import CorpusBundle
+from vdbbench.corpus.bundle import CorpusBundle, IncompatibleManifestError
 from vdbbench.embed.encoder import (
+    ENCODED_MANIFEST_SCHEMA_VERSION,
     EncodedBundle,
     Encoder,
     FakeEncoder,
@@ -283,6 +284,28 @@ class TestSaveLoad:
         swapped.save(out / "corpus")
 
         with pytest.raises(ValueError, match="corpus fingerprint does not match"):
+            load_encoded_bundle(out)
+
+    def test_save_includes_schema_version(self, tmp_path: Path) -> None:
+        """Every fresh encoded-bundle save stamps the current schema_version."""
+        bundle = _toy_bundle()
+        encoded = encode_corpus(bundle, FakeEncoder(dim=8))
+        out = encoded.save(tmp_path / "encoded")
+        manifest = json.loads((out / "manifest.json").read_text())
+        assert manifest["schema_version"] == ENCODED_MANIFEST_SCHEMA_VERSION
+
+    def test_load_rejects_unknown_schema_version(self, tmp_path: Path) -> None:
+        """An encoded-bundle manifest with a future/unknown schema_version
+        must raise — silently mis-parsing would attach the wrong vector
+        format to a corpus."""
+        bundle = _toy_bundle()
+        encoded = encode_corpus(bundle, FakeEncoder(dim=8))
+        out = encoded.save(tmp_path / "encoded")
+        manifest_path = out / "manifest.json"
+        manifest = json.loads(manifest_path.read_text())
+        manifest["schema_version"] = 99
+        manifest_path.write_text(json.dumps(manifest))
+        with pytest.raises(IncompatibleManifestError, match="schema_version=99"):
             load_encoded_bundle(out)
 
     def test_load_warns_on_encoded_at_fingerprint_drift(self, tmp_path: Path) -> None:

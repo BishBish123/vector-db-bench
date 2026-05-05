@@ -16,6 +16,22 @@ PASSAGE_COLS: tuple[str, ...] = ("pid", "text")
 QUERY_COLS: tuple[str, ...] = ("qid", "text")
 QREL_COLS: tuple[str, ...] = ("qid", "pid", "relevance")
 
+# Bumped any time the corpus manifest schema changes in a way readers care
+# about (renamed fields, removed fields, semantically different fields).
+# See ``docs/adr-005-manifest-schema-versioning.md`` for the bumping
+# procedure — adding a new field that defaults sensibly does NOT need a
+# bump, only changes that older loaders would mis-parse.
+CORPUS_MANIFEST_SCHEMA_VERSION: int = 1
+
+
+class IncompatibleManifestError(ValueError):
+    """Raised when a manifest's `schema_version` doesn't match the loader's.
+
+    The error message includes both versions plus the manifest path so a
+    reviewer can decide whether to upgrade vdbbench, regenerate the
+    bundle, or branch the loader.
+    """
+
 
 def _ensure_columns(df: pd.DataFrame, expected: tuple[str, ...], name: str) -> pd.DataFrame:
     missing = [c for c in expected if c not in df.columns]
@@ -452,6 +468,7 @@ class CorpusBundle:
         self.queries.to_parquet(root_path / "queries.parquet", index=False)
         self.qrels.to_parquet(root_path / "qrels.parquet", index=False)
         manifest = {
+            "schema_version": CORPUS_MANIFEST_SCHEMA_VERSION,
             "name": self.name,
             "n_passages": self.n_passages,
             "n_queries": self.n_queries,
@@ -469,6 +486,16 @@ class CorpusBundle:
         if not manifest_path.exists():
             raise FileNotFoundError(f"no manifest.json under {root_path}")
         manifest = json.loads(manifest_path.read_text())
+        # Pre-versioning manifests (no `schema_version` key) are treated
+        # as v1 — they happen to be compatible with v1's reader, and
+        # rejecting them would gratuitously break older bundles on disk.
+        version = int(manifest.get("schema_version", CORPUS_MANIFEST_SCHEMA_VERSION))
+        if version != CORPUS_MANIFEST_SCHEMA_VERSION:
+            raise IncompatibleManifestError(
+                f"corpus manifest at {manifest_path} has schema_version={version}; "
+                f"this loader expects {CORPUS_MANIFEST_SCHEMA_VERSION}. "
+                f"Regenerate the bundle or use a vdbbench release that matches."
+            )
         bundle = cls(
             name=str(manifest["name"]),
             passages=pd.read_parquet(root_path / "passages.parquet"),
