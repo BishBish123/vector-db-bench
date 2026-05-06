@@ -336,7 +336,7 @@ def _run_one_spec(
     encoded: EncodedBundle,
     pids: list[str],
     qids: list[str],
-    qrel_index: dict[str, dict[str, int]],
+    qrel_index: dict[str, dict[str, float]],
     timing_rows: list[QueryTiming],
     summary_rows: list[RunSummary],
 ) -> None:
