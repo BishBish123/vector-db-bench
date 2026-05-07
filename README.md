@@ -29,13 +29,15 @@ The numbers below come from a 5 000-vector synthetic corpus with brute-force gro
 
 | DB | Ingest (vps) | p95 latency (ms) | Recall@10 | NDCG@10 | QPS (est.) | Index disk |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| pgvector (HNSW defaults) | 7 450 | 57 | 0.864 | 0.909 | ~21 | 4.5 MB |
-| qdrant (HNSW defaults) | 5 534 | 8 | 1.000 | 1.000 | ~143 | (mem) |
+| pgvector (HNSW defaults) | 3 016 | 9 | 0.876 | 0.920 | ~150 | 4.4 MB |
+| qdrant (HNSW defaults) | 4 814 | 14 | 1.000 | 1.000 | ~88 | (mem) |
+
+Numbers regenerated from `results/demo/summary.parquet` against the current code (pgvector connection-reuse + RSS sampling fixes). Earlier drafts of this README quoted pgvector p95 ~57 ms with a "per-query connection overhead" caveat — that caveat is gone because the adapter now reuses a single psycopg connection across the whole `BenchSpec` lifecycle (see [BLOG.md](BLOG.md) for the methodology story).
 
 Notes worth flagging — these are *exactly* the kinds of caveats the blog post will dig into:
 
-- `pgvector` numbers above include per-query connection-open overhead (~40 ms on macOS Docker). A connection-pooled adapter would close most of the latency gap; both numbers are honest as measured today.
-- 100 % recall on Qdrant at this scale is expected — HNSW with default `m=16` over 5 000 vectors is essentially exact. The interesting curves come from sweeping `ef_search` over a real corpus.
+- 5 000 vectors is well below where ANN-vs-exact differences matter. The pgvector vs Qdrant ordering you see here is dominated by per-query overhead and host noise rather than search-algorithm quality. The interesting curves come from sweeping `ef_search` over a real corpus at scale; treat these numbers as a smoke test of the harness, not a verdict.
+- 100 % recall on Qdrant at this scale is expected — HNSW with default `m=16` over 5 000 vectors is essentially exact. pgvector's 0.876 is also fine (HNSW with no `ef_search` tuning).
 
 ## Reproduce
 

@@ -15,12 +15,12 @@ I built a benchmark harness because every "which vector DB should I use?" articl
 
 | DB | Ingest (vps) | p95 latency | Recall@10 | QPS (est.) |
 | --- | ---: | ---: | ---: | ---: |
-| pgvector | 7 450 | 12 ms | 0.864 | ~95 |
-| qdrant | 5 534 | 8 ms | 1.000 | ~143 |
+| pgvector | 3 016 | 9 ms | 0.876 | ~150 |
+| qdrant | 4 814 | 14 ms | 1.000 | ~88 |
 
-Headlines write themselves: *"Qdrant is faster than pgvector and has perfect recall."* That's still not the headline — keep reading.
+Headlines write themselves: *"pgvector is faster on p95 and Qdrant has perfect recall."* That's still not the headline — keep reading.
 
-> **Methodology updates (May 2026).** These numbers reflect the round-1 + round-2 fixes shipped in this repo. The earlier draft of this post quoted pgvector p95 ~57 ms because the harness was opening a new psycopg connection per query; the table now uses the connection-reuse fix. The earlier draft also said RSS sampling was a follow-up; it's now part of every run. See the [round-1](https://github.com/BishBish123/vector-db-bench/commits/main) commit history for the exact changes that affect these numbers.
+> **Methodology updates (May 2026).** These numbers reflect the round-1 + round-2 + round-3 fixes shipped in this repo, regenerated against `results/demo/summary.parquet` on the same host the rest of the post cites. The earlier draft quoted pgvector p95 ~57 ms because the harness was opening a new psycopg connection per query; the table now uses the connection-reuse fix. The earlier draft also said RSS sampling was a follow-up; it's now part of every run. See the [commit history](https://github.com/BishBish123/vector-db-bench/commits/main) for the exact changes that affect these numbers.
 
 ## Why the headline is wrong
 
@@ -28,7 +28,7 @@ Headlines write themselves: *"Qdrant is faster than pgvector and has perfect rec
 
 The first cut of the harness opened a new psycopg connection inside `search()`. Across 50 queries on macOS Docker, that's ~40 ms of per-query connection overhead — the kind of methodology hole a vendor blog post quietly skips and an honest one calls out.
 
-The harness now reuses one psycopg connection across every query for the entire `BenchSpec` lifecycle (`setup` opens, `teardown` closes), with the SQL `prepare` deduped to a single round-trip. Re-running the demo against the corrected harness drops pgvector's p95 from ~57 ms to ~12 ms — still slower than Qdrant on this dataset, but the gap is closer to 1.5× than 7×. The numbers in the table at the top of this post have been regenerated against the current code.
+The harness now reuses one psycopg connection across every query for the entire `BenchSpec` lifecycle (`setup` opens, `teardown` closes), with the SQL `prepare` deduped to a single round-trip. Re-running the demo against the corrected harness drops pgvector's p95 from ~57 ms into the high-single-digit range — at 5K vectors with default HNSW knobs it's actually faster on p95 than Qdrant on this host, which is the kind of inversion you only see once the connection-establishment noise is out of the picture. The numbers in the table at the top of this post have been regenerated against the current code.
 
 ### 2. 100 % recall on Qdrant is *not* a quality flex
 
