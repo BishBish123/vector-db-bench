@@ -4,7 +4,7 @@
     "pgvector": "pgvector==0.4.2",
     "qdrant": "qdrant-client==1.17.1"
   },
-  "bench_completed_at": "2026-05-07T22:15:44.762140+00:00",
+  "bench_completed_at": "2026-05-07T22:29:07.229259+00:00",
   "bench_specs": [
     {
       "adapter": "pgvector",
@@ -47,7 +47,7 @@
       "warmup_queries": 10
     }
   ],
-  "bench_started_at": "2026-05-07T22:15:44.410294+00:00",
+  "bench_started_at": "2026-05-07T22:17:25.857237+00:00",
   "encoded_bundle_fingerprint": "9dcb00839c11969f9472032aac7e667f",
   "encoder_dim": 384,
   "encoder_name": "synthetic-gaussian",
@@ -60,7 +60,7 @@
     "python_version": "3.12.13",
     "total_memory_bytes": 8589934592
   },
-  "partial": true,
+  "partial": false,
   "schema_version": 1,
   "vdbbench_version": "0.1.0"
 }

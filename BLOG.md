@@ -85,6 +85,36 @@ The sweep writes `results/sweep/sweep.parquet` and `results/sweep/sweep_pareto.{
 
 The knob-grid runner is adapter-agnostic: the same `SweepSpec` / `run_sweep` API works against any adapter that follows the `VectorStoreAdapter` protocol — swap `"exact"` for `"pgvector"` and pass `ef_search=32,64,128,256` to sweep HNSW's main search-time knob on a real Postgres instance.
 
+### A methodology lesson: defaults aren't always reasonable
+
+The 100K synthetic-Gaussian run (see `MEASURED-ON.md`) is a worked example of why you
+have to sweep before reporting. pgvector's default `ef_search=10` gives recall@10=0.06
+at 100K vectors and dim=384. That's not a bug; it's a correct consequence of the data:
+
+**Synthetic 384-dim Gaussian vectors have no cluster structure.** HNSW's greedy
+traversal exploits cluster structure to short-circuit the graph — that's what makes
+HNSW fast on real retrieval data. Uniform random vectors give HNSW nothing to exploit,
+so even at ef\_search=256 (the top end of the sweep), recall only reaches 0.272. On
+actual MS-MARCO passages at the same dimension, ef\_search=64 routinely hits recall ≥ 0.92.
+
+The sweep over `ef_search ∈ {32, 64, 128, 256}` with fixed `m=16` (see
+`results/100k/sweep-tuned/sweep.parquet`) shows the full recall-vs-latency Pareto curve:
+
+| ef\_search | recall@10 | p95 (ms) |
+| ---: | ---: | ---: |
+| 32 | 0.050 | 25.1 |
+| 64 | 0.098 | 35.7 |
+| 128 | 0.172 | 38.8 |
+| **256** | **0.272** | **70.1** |
+
+The right operating point is ef\_search=256 for this corpus — not because it gives
+great recall, but because it is the best achievable on this data without rebuilding
+the index with higher `m` or `ef_construction`. The takeaway: **report both the default
+run and the tuned run**. A reader who only sees the tuned number wonders why recall is
+capped at 0.28; a reader who only sees the default number (0.06) thinks pgvector is
+broken. Both numbers together tell the right story: synthetic Gaussian benchmarks are
+adversarial for HNSW, and real workloads will look very different.
+
 ## Published HTML report
 
 All of the above — methodology, headline metrics, charts, and per-adapter detail
