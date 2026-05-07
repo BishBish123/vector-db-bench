@@ -51,6 +51,8 @@ from vdbbench.metrics.retrieval import (
     ndcg_at_k,
     recall_at_k,
 )
+from vdbbench.pricing import cost_per_million_queries_usd as _cost_per_million
+from vdbbench.profile.memory import MemorySampler
 
 # Bumped any time the manifest schema changes in a way readers care about.
 BENCH_MANIFEST_SCHEMA_VERSION: int = 1
@@ -270,6 +272,10 @@ class RunSummary:
     index_rss_bytes: int = 0
     peak_rss_bytes: int = 0
     adapter_memory_bytes: int = 0
+    # Estimated cloud cost per million queries, computed from the measured QPS
+    # and the adapter's public pricing tier (see vdbbench.pricing). None /
+    # NaN when the adapter is not in the pricing table or QPS is zero.
+    cost_per_million_queries_usd: float = float("nan")
 
 
 @dataclass(frozen=True)
@@ -564,6 +570,79 @@ def _write_incremental(
     )
 
 
+def _prom_observe_ingest(adapter_name: str, n_vectors: int) -> None:
+    """Emit ingest count to Prometheus. Best-effort: never raises."""
+    try:
+        from vdbbench import prom_metrics as _pm  # noqa: PLC0415
+
+        _pm.observe_ingest(adapter_name=adapter_name, n_vectors=n_vectors)
+    except Exception:  # pragma: no cover - metrics must not break the bench
+        pass
+
+
+def _prom_observe_query_latency(adapter_name: str, latency_ms: float) -> None:
+    """Emit one query latency observation to Prometheus. Best-effort: never raises."""
+    try:
+        from vdbbench import prom_metrics as _pm  # noqa: PLC0415
+
+        _pm.observe_query_latency(adapter_name=adapter_name, latency_s=latency_ms / 1000.0)
+    except Exception:  # pragma: no cover - metrics must not break the bench
+        pass
+
+
+def _prom_observe_spec_end(
+    adapter_name: str, k: int, recall: float, duration_s: float
+) -> None:
+    """Emit recall + duration observations to Prometheus. Best-effort: never raises."""
+    try:
+        from vdbbench import prom_metrics as _pm  # noqa: PLC0415
+
+        _pm.observe_recall(adapter_name=adapter_name, k=k, recall=recall)
+        _pm.observe_bench_duration(adapter_name=adapter_name, duration_s=duration_s)
+    except Exception:  # pragma: no cover - metrics must not break the bench
+        pass
+
+
+def _run_measured_queries(
+    spec: BenchSpec,
+    encoded: EncodedBundle,
+    qids: list[str],
+    qrel_index: dict[str, dict[str, float]],
+    timing_rows: list[QueryTiming],
+) -> tuple[list[float], list[float], list[float]]:
+    """Execute the measured query passes, recording timings and recall.
+
+    Returns (recalls, ndcgs, latencies_ms). Extracted from ``_run_one_spec``
+    to keep that function under the statement-count lint cap.
+    """
+    recalls: list[float] = []
+    ndcgs: list[float] = []
+    latencies_ms: list[float] = []
+    for repeat in range(spec.repeats):
+        for i, qid in enumerate(qids):
+            qvec = encoded.query_vectors[i]
+            t0 = time.perf_counter()
+            retrieved = spec.adapter.search(qvec, spec.k)
+            latency_ms = (time.perf_counter() - t0) * 1000.0
+            timing_rows.append(
+                QueryTiming(
+                    db=spec.adapter.name,
+                    params_hash=spec.params_hash(),
+                    repeat=repeat,
+                    qid=qid,
+                    latency_ms=latency_ms,
+                    retrieved_pids=tuple(retrieved),
+                )
+            )
+            latencies_ms.append(latency_ms)
+            _prom_observe_query_latency(spec.adapter.name, latency_ms)
+            if qid in qrel_index:
+                rel = qrel_index[qid]
+                recalls.append(recall_at_k(retrieved, rel, spec.k))
+                ndcgs.append(ndcg_at_k(retrieved, rel, spec.k))
+    return recalls, ndcgs, latencies_ms
+
+
 def _run_one_spec(
     spec: BenchSpec,
     encoded: EncodedBundle,
@@ -611,9 +690,21 @@ def _run_one_spec(
                 cleanup()
         raise
     peak_tracker.observe()  # post-setup
+    spec_started_at = time.perf_counter()
     try:
+        # MemorySampler wraps ingest + index + query phases so
+        # adapter_memory_bytes captures the actual peak RSS the adapter
+        # caused, not the SDK-reported value (which is always 0 for
+        # service-side adapters).  The sampler runs on a background
+        # thread at 100ms intervals and is fully independent of the
+        # _PeakRssTracker checkpoints above.
+        _mem_sampler = MemorySampler(interval_s=0.1)
+        _mem_sampler.start()
+
         ingest_stats = spec.adapter.ingest(pids, encoded.passage_vectors)
         peak_tracker.observe()  # post-ingest
+        _prom_observe_ingest(spec.adapter.name, ingest_stats.n_vectors)
+
         index_stats = spec.adapter.build_index()
         index_rss_delta = peak_tracker.observe()  # post-index_build
 
@@ -623,53 +714,32 @@ def _run_one_spec(
             spec.adapter.search(encoded.query_vectors[i], spec.k)
         peak_tracker.observe()  # post-warm-up
 
-        # Measured runs.
-        recalls: list[float] = []
-        ndcgs: list[float] = []
-        latencies_ms: list[float] = []
-        for repeat in range(spec.repeats):
-            for i, qid in enumerate(qids):
-                qvec = encoded.query_vectors[i]
-                t0 = time.perf_counter()
-                retrieved = spec.adapter.search(qvec, spec.k)
-                latency_ms = (time.perf_counter() - t0) * 1000.0
-                timing_rows.append(
-                    QueryTiming(
-                        db=spec.adapter.name,
-                        params_hash=spec.params_hash(),
-                        repeat=repeat,
-                        qid=qid,
-                        latency_ms=latency_ms,
-                        retrieved_pids=tuple(retrieved),
-                    )
-                )
-                latencies_ms.append(latency_ms)
-                if qid in qrel_index:
-                    rel = qrel_index[qid]
-                    recalls.append(recall_at_k(retrieved, rel, spec.k))
-                    ndcgs.append(ndcg_at_k(retrieved, rel, spec.k))
+        recalls, ndcgs, latencies_ms = _run_measured_queries(
+            spec, encoded, qids, qrel_index, timing_rows
+        )
 
         peak_tracker.observe()  # post-measured-queries
-        adapter_mem = 0
-        try:
-            adapter_mem = int(spec.adapter.memory_footprint_bytes())
-        except Exception:  # pragma: no cover - adapter-level instability
-            adapter_mem = 0
 
-        summary_rows.append(
-            _build_summary(
-                spec,
-                encoded,
-                ingest_stats,
-                index_stats,
-                recalls,
-                ndcgs,
-                latencies_ms,
-                baseline_rss=baseline_rss,
-                index_rss=index_rss_delta,
-                peak_rss=peak_tracker.peak,
-                adapter_memory=adapter_mem,
-            )
+        _mem_stats = _mem_sampler.stop()
+        adapter_mem = _mem_stats.peak_rss_bytes
+
+        summary = _build_summary(
+            spec,
+            encoded,
+            ingest_stats,
+            index_stats,
+            recalls,
+            ndcgs,
+            latencies_ms,
+            baseline_rss=baseline_rss,
+            index_rss=index_rss_delta,
+            peak_rss=peak_tracker.peak,
+            adapter_memory=adapter_mem,
+        )
+        summary_rows.append(summary)
+        _prom_observe_spec_end(
+            spec.adapter.name, spec.k, summary.recall_at_k_mean,
+            time.perf_counter() - spec_started_at,
         )
     finally:
         spec.adapter.teardown()
@@ -888,6 +958,16 @@ def _build_summary(
         if latencies_ms
         else float("nan")
     )
+    # $/M-queries: use measured total query time so the cost reflects
+    # the *actual* QPS this host achieved, not a theoretical rate.
+    total_query_s = sum(latencies_ms) / 1000.0  # ms -> seconds
+    n_measured = len(latencies_ms)
+    cost_m = _cost_per_million(
+        adapter=spec.adapter.name,
+        total_queries=n_measured,
+        total_query_seconds=total_query_s,
+    )
+    cost_per_m: float = cost_m if cost_m is not None else float("nan")
     return RunSummary(
         db=spec.adapter.name,
         label=spec.display_label(),
@@ -913,4 +993,5 @@ def _build_summary(
         index_rss_bytes=int(index_rss),
         peak_rss_bytes=int(peak_rss),
         adapter_memory_bytes=int(adapter_memory),
+        cost_per_million_queries_usd=cost_per_m,
     )

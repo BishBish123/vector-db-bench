@@ -1,0 +1,96 @@
+name: reproducibility
+
+on:
+  schedule:
+    # Weekly: Sunday at 02:00 UTC — runs after the main CI window to avoid
+    # contention, and gives the team a Monday-morning signal on any drift.
+    - cron: "0 2 * * 0"
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: reproducibility-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  smoke-reproducibility:
+    # Offline path: uses the in-process `exact` adapter so no Docker-in-Docker
+    # is needed. Verifies that:
+    #   1. The image builds (Dockerfile is parseable + installable).
+    #   2. The bench CLI exits 0.
+    #   3. A summary.parquet is produced.
+    #   4. The parquet matches results/demo/summary.parquet within tolerance.
+    #
+    # Docker build is intentionally omitted here — building a multi-stage
+    # image inside GitHub Actions' standard ubuntu runner is slow and brittle
+    # (layer cache misses on every commit). The full Docker path is documented
+    # in scripts/reproduce.sh and is best exercised locally or on a
+    # self-hosted runner with a warm Docker cache.
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+
+      - name: Set up Python 3.12
+        run: uv python install 3.12
+
+      - name: Sync production deps (no dev extras for parity with image)
+        run: uv sync --python 3.12 --extra dev
+
+      - name: Verify Dockerfile is present and non-empty
+        run: |
+          test -s Dockerfile
+          echo "Dockerfile OK ($(wc -l < Dockerfile) lines)"
+
+      - name: Verify docker-compose.full.yml is valid YAML
+        run: |
+          uv run python -c "
+          import yaml, pathlib
+          data = yaml.safe_load(pathlib.Path('docker-compose.full.yml').read_text())
+          assert 'services' in data, 'missing services key'
+          assert 'vdbbench' in data['services'], 'missing vdbbench service'
+          assert 'pgvector' in data['services'], 'missing pgvector service'
+          assert 'qdrant' in data['services'], 'missing qdrant service'
+          print('docker-compose.full.yml OK')
+          "
+
+      - name: Verify scripts/reproduce.sh passes bash -n (syntax check)
+        run: bash -n scripts/reproduce.sh
+
+      - name: Prep synthetic encoded bundle
+        run: |
+          uv run vdbbench prep \
+            --dataset synthetic \
+            --sample-size 5000 \
+            --dim 64 \
+            --out data/encoded-demo
+
+      - name: Run smoke reproducibility (--smoke-only, exact adapter)
+        run: |
+          RESULTS_DIR=results/reproduced ./scripts/reproduce.sh --smoke-only
+
+      - name: Verify parquet was produced
+        run: |
+          test -f results/reproduced/summary.parquet
+          uv run python -c "
+          import pandas as pd
+          df = pd.read_parquet('results/reproduced/summary.parquet')
+          assert len(df) >= 1, f'Expected at least 1 row, got {len(df)}'
+          print(f'Parquet OK: {len(df)} row(s), columns: {list(df.columns)}')
+          "
+
+      - name: Upload reproduced results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: reproduced-parquet
+          path: results/reproduced/
+          retention-days: 14

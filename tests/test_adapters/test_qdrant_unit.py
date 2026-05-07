@@ -8,6 +8,7 @@ container; this file covers what's testable with just a stub client.
 
 from __future__ import annotations
 
+import numpy as np
 import pytest
 
 from vdbbench.adapters.qdrant import QdrantAdapter
@@ -65,8 +66,6 @@ class TestQdrantTeardownResetsDim:
         )
 
     def test_post_teardown_ingest_rejects(self) -> None:
-        import numpy as np
-
         adapter, _ = self._adapter()
         adapter.teardown()
         with pytest.raises(RuntimeError, match="called before setup"):

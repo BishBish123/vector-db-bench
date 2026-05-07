@@ -129,3 +129,11 @@ class ExactAdapter:
         if self._mat is None:
             return 0
         return int(self._mat.nbytes)
+
+    def cleanup_partial_setup(self) -> None:
+        # In-process adapter — setup() only sets a handful of Python
+        # attributes (self._dim, self._metric, self._ids, self._mat).  There
+        # is no on-disk state, no network resource, and no external service to
+        # notify.  Python's GC reclaims the objects when the adapter is
+        # discarded, so nothing needs to be done here.
+        return

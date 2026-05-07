@@ -30,6 +30,7 @@ class SentenceTransformerEncoder:
         model_name: str = "BAAI/bge-small-en-v1.5",
         device: str | None = None,
         normalize: bool = True,
+        trust_remote_code: bool = False,
     ) -> None:
         try:
             from sentence_transformers import (  # noqa: PLC0415  -- optional import
@@ -44,7 +45,12 @@ class SentenceTransformerEncoder:
         self._model_name = model_name
         self._device = device or detect_device()
         self._normalize = normalize
-        self._model: SentenceTransformer = SentenceTransformer(model_name, device=self._device)
+        self._trust_remote_code = trust_remote_code
+        self._model: SentenceTransformer = SentenceTransformer(
+            model_name,
+            device=self._device,
+            trust_remote_code=trust_remote_code,
+        )
         self._dim = int(self._model.get_sentence_embedding_dimension())
 
     @property

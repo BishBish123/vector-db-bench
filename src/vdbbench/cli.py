@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import contextlib
 import warnings
+from collections.abc import Generator
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -13,6 +15,7 @@ from vdbbench import __version__
 
 if TYPE_CHECKING:  # pragma: no cover - import only resolved by type-checker
     from vdbbench.bench import BenchSpec
+    from vdbbench.embed import EncodedBundle
 
 app = typer.Typer(
     name="vdbbench",
@@ -212,7 +215,10 @@ def prep(
     out: Path = typer.Option(Path("data/encoded"), help="Where to write the encoded bundle."),
     dataset: str = typer.Option(
         "synthetic",
-        help="Corpus source: 'synthetic', 'msmarco', or any BeIR/<name> identifier.",
+        help=(
+            "Corpus source: 'synthetic', 'msmarco', 'wikipedia', "
+            "or any BeIR/<name> identifier."
+        ),
     ),
     sample_size: int = typer.Option(
         5_000,
@@ -221,26 +227,79 @@ def prep(
             "sub-sample). Default 5000 matches the demo bundle "
             "committed under results/demo/, so a bare `vdbbench prep` "
             "produces the same scale the README quotes; override via "
-            "`--sample-size` for larger sweeps."
+            "`--sample-size` for larger sweeps. "
+            "Required for --dataset wikipedia."
         ),
     ),
-    embed_model: str = typer.Option(
-        "BAAI/bge-small-en-v1.5", help="sentence-transformers model id."
+    encoder: str | None = typer.Option(
+        None,
+        "--encoder",
+        help=(
+            "Encoder shortname: 'bge' (384-dim, default) or 'nomic' "
+            "(768-dim, uses trust_remote_code=True). "
+            "Mutually exclusive with --embed-model."
+        ),
+    ),
+    embed_model: str | None = typer.Option(
+        None,
+        help=(
+            "sentence-transformers model id (raw HuggingFace ID). "
+            "Mutually exclusive with --encoder. "
+            "Defaults to 'BAAI/bge-small-en-v1.5' when neither flag is set."
+        ),
     ),
     dim: int = typer.Option(384, help="Embedding dim (only used for 'synthetic')."),
     seed: int = typer.Option(42, help="Random seed for deterministic sampling."),
     n_queries: int = typer.Option(100, help="Number of queries (only used for 'synthetic')."),
+    limit: int | None = typer.Option(
+        None,
+        "--limit",
+        help=(
+            "Maximum number of documents to stream (wikipedia only). "
+            "Required when --dataset wikipedia; omitting it errors out "
+            "with a helpful message pointing at --limit."
+        ),
+    ),
+    fixtures: Path | None = typer.Option(
+        None,
+        "--fixtures",
+        help=(
+            "Path to a JSONL fixture file for --dataset wikipedia. "
+            "When set, reads from the file instead of streaming from "
+            "HuggingFace (useful for tests and offline smoke runs)."
+        ),
+    ),
+    wiki_chunk_size: int = typer.Option(
+        512,
+        "--wiki-chunk-size",
+        help="Wikipedia chunker: max chunk length in characters.",
+    ),
+    wiki_overlap: int = typer.Option(
+        64,
+        "--wiki-overlap",
+        help="Wikipedia chunker: overlap in characters between adjacent chunks.",
+    ),
 ) -> None:
     """Build corpus + embeddings + ground-truth qrels into a parquet bundle."""
+    if encoder is not None and embed_model is not None:
+        raise typer.BadParameter(
+            "--encoder and --embed-model are mutually exclusive; pass one or the other.",
+            param_hint="--encoder / --embed-model",
+        )
     try:
         _prep_impl(
             out=out,
             dataset=dataset,
             sample_size=sample_size,
+            encoder=encoder,
             embed_model=embed_model,
             dim=dim,
             seed=seed,
             n_queries=n_queries,
+            limit=limit,
+            fixtures=fixtures,
+            wiki_chunk_size=wiki_chunk_size,
+            wiki_overlap=wiki_overlap,
         )
     except _USER_FACING_ERRORS as exc:
         _handle_user_error(exc)
@@ -251,10 +310,15 @@ def _prep_impl(
     out: Path,
     dataset: str,
     sample_size: int,
-    embed_model: str,
+    encoder: str | None,
+    embed_model: str | None,
     dim: int,
     seed: int,
     n_queries: int,
+    limit: int | None = None,
+    fixtures: Path | None = None,
+    wiki_chunk_size: int = 512,
+    wiki_overlap: int = 64,
 ) -> None:
     from vdbbench.corpus import (  # noqa: PLC0415
         SyntheticConfig,
@@ -278,17 +342,152 @@ def _prep_impl(
             metadata={"dataset": "synthetic", "seed": seed, "dim": dim},
         )
         console.print(f"[green]synthetic[/] corpus: {encoded.bundle.n_passages} passages")
+    elif dataset == "wikipedia":
+        encoded = _prep_wikipedia(
+            out=out,
+            limit=limit,
+            fixtures=fixtures,
+            encoder=encoder,
+            embed_model=embed_model,
+            wiki_chunk_size=wiki_chunk_size,
+            wiki_overlap=wiki_overlap,
+        )
     else:
         if dataset == "msmarco":
             bundle = load_msmarco(sample_size=sample_size, seed=seed)
         else:
             bundle = load_beir_dataset(dataset_name=dataset, sample_size=sample_size, seed=seed)
-        from vdbbench.embed import SentenceTransformerEncoder  # noqa: PLC0415
+        if encoder is not None:
+            # Short name path: resolve via registry so trust_remote_code is
+            # automatically propagated (critical for nomic).
+            from vdbbench.embed.registry import build_encoder  # noqa: PLC0415
 
-        encoder = SentenceTransformerEncoder(model_name=embed_model)
-        encoded = encode_corpus(bundle, encoder, metadata={"dataset": dataset, "seed": seed})
+            enc = build_encoder(encoder)
+        else:
+            # Raw HF ID path (legacy --embed-model or the default).
+            resolved_model = embed_model or "BAAI/bge-small-en-v1.5"
+            if embed_model is None:
+                # Neither flag was passed — keep existing default behaviour.
+                pass
+            else:
+                # --embed-model with a raw HF ID: trust_remote_code stays
+                # False. Users who need it for nomic should use --encoder nomic.
+                console.print(
+                    "[yellow]note[/]: --embed-model uses trust_remote_code=False. "
+                    "For nomic-embed-text-v1.5 use --encoder nomic instead."
+                )
+            from vdbbench.embed import SentenceTransformerEncoder  # noqa: PLC0415
+
+            enc = SentenceTransformerEncoder(model_name=resolved_model)
+        encoded = encode_corpus(bundle, enc, metadata={"dataset": dataset, "seed": seed})
     encoded.save(out)
     console.print(f"[green]wrote[/] encoded bundle to {out}")
+
+
+def _prep_wikipedia(
+    *,
+    out: Path,
+    limit: int | None,
+    fixtures: Path | None,
+    encoder: str | None,
+    embed_model: str | None,
+    wiki_chunk_size: int,
+    wiki_overlap: int,
+) -> EncodedBundle:
+    """Build an encoded bundle from Wikipedia articles.
+
+    When ``fixtures`` is set, reads from the JSONL file instead of streaming
+    from HuggingFace (offline/test path). Otherwise streams from HuggingFace
+    using the ``datasets`` library (requires ``[wiki]`` extras).
+
+    Wikipedia has no query/qrel ground truth, so we synthesise a minimal
+    placeholder so the rest of the pipeline (which expects a full
+    ``CorpusBundle``) works.  Concretely, we produce one synthetic query per
+    1000 chunks (or at least one query) whose text is taken from the chunk
+    title, with a self-relevance qrel of 1.0. This is adequate for
+    ``vdbbench bench`` smoke runs but not for precision/recall evaluation
+    against Wikipedia-specific qrels.
+    """
+    import pandas as pd  # noqa: PLC0415
+
+    from vdbbench.corpus.bundle import CorpusBundle  # noqa: PLC0415
+    from vdbbench.corpus.wikipedia import WikipediaCorpus, iter_chunks  # noqa: PLC0415
+    from vdbbench.embed import encode_corpus  # noqa: PLC0415
+
+    if fixtures is not None:
+        if not fixtures.is_file():
+            raise FileNotFoundError(f"Wikipedia fixtures file not found: {fixtures}")
+        docs_iter = WikipediaCorpus.from_fixtures(fixtures)
+        effective_limit = limit  # still honour --limit for truncation
+        if effective_limit is not None:
+            import itertools  # noqa: PLC0415
+
+            docs_iter = itertools.islice(docs_iter, effective_limit)
+        console.print(f"[green]wikipedia[/] loading fixtures from {fixtures}")
+    else:
+        if limit is None:
+            raise ValueError(
+                "Wikipedia is large; specify --limit (e.g. --limit 10000) for a sized run. "
+                "To use a fixture file instead of streaming, pass --fixtures <path>."
+            )
+        console.print(f"[green]wikipedia[/] streaming {limit} articles from HuggingFace")
+        docs_iter = WikipediaCorpus.from_huggingface(limit=limit)
+
+    chunks = list(iter_chunks(docs_iter, chunk_size=wiki_chunk_size, overlap=wiki_overlap))
+    if not chunks:
+        raise ValueError("Wikipedia corpus produced zero chunks — check the fixture file or limit.")
+
+    console.print(f"[green]wikipedia[/] {len(chunks)} chunks from articles")
+
+    # Build a minimal CorpusBundle: passages = chunks, queries = one per
+    # 1000 chunks (or at least 1), self-relevant qrels.
+    passage_rows = [{"pid": c.chunk_id, "text": (c.title + " " + c.text).strip()} for c in chunks]
+    passages = pd.DataFrame(passage_rows)
+
+    query_stride = max(1, len(chunks) // max(1, len(chunks) // 1000))
+    query_indices = list(range(0, len(chunks), query_stride))
+    query_rows = [
+        {"qid": f"wq_{i}", "text": chunks[i].title or chunks[i].text[:120]}
+        for i in query_indices
+    ]
+    queries = pd.DataFrame(query_rows)
+
+    qrel_rows = [
+        {"qid": f"wq_{i}", "pid": chunks[i].chunk_id, "relevance": 1.0}
+        for i in query_indices
+    ]
+    qrels = pd.DataFrame(qrel_rows)
+
+    bundle = CorpusBundle(
+        name=f"wikipedia@n={len(chunks)}",
+        passages=passages,
+        queries=queries,
+        qrels=qrels,
+        metadata={
+            "dataset": "wikipedia",
+            "n_chunks": len(chunks),
+            "chunk_size": wiki_chunk_size,
+            "overlap": wiki_overlap,
+            "fixtures": str(fixtures) if fixtures else None,
+        },
+    )
+
+    if encoder is not None:
+        from vdbbench.embed.registry import build_encoder  # noqa: PLC0415
+
+        enc = build_encoder(encoder)
+    else:
+        resolved_model = embed_model or "BAAI/bge-small-en-v1.5"
+        if embed_model is not None:
+            console.print(
+                "[yellow]note[/]: --embed-model uses trust_remote_code=False. "
+                "For nomic-embed-text-v1.5 use --encoder nomic instead."
+            )
+        from vdbbench.embed import SentenceTransformerEncoder  # noqa: PLC0415
+
+        enc = SentenceTransformerEncoder(model_name=resolved_model)
+
+    return encode_corpus(bundle, enc, metadata={"dataset": "wikipedia"})
 
 
 def _build_bench_specs(
@@ -445,6 +644,33 @@ def bench(
         "warm",
         help="Bench profile: 'cold' (no warm-up), 'warm' (default), 'p99' (50 warm-up + 5 repeats).",
     ),
+    prometheus_port: int | None = typer.Option(
+        None,
+        "--prometheus-port",
+        help=(
+            "If set, start a Prometheus HTTP scrape endpoint on this port "
+            "before the bench begins. After the run: "
+            "``curl localhost:<PORT>/metrics | grep vdbbench`` shows "
+            "vdbbench_ingest_vectors_total, vdbbench_query_latency_seconds, "
+            "vdbbench_query_recall_at_k, and vdbbench_bench_duration_seconds. "
+            "Unset (default) means no exporter is started."
+        ),
+    ),
+    profiler: str | None = typer.Option(
+        None,
+        "--profiler",
+        help=(
+            "Opt-in profiler to run alongside the bench.  Supported: "
+            "'py-spy' (flame graph SVG, requires py-spy installed: "
+            "``pip install 'vdbbench[profile]'``), 'iostat' (I/O stats "
+            "text file using the system iostat binary), or 'ps_mem' "
+            "(per-process memory breakdown — shared vs private vs swap — "
+            "using the system ps_mem binary: brew install ps_mem or "
+            "apt install ps_mem).  All three soft-fail with a warning "
+            "when the binary is not on PATH.  Example: "
+            "--profiler py-spy  or  --profiler iostat  or  --profiler ps_mem"
+        ),
+    ),
 ) -> None:
     """Run the bench across every adapter the user enabled by passing a DSN/path."""
     try:
@@ -460,6 +686,8 @@ def bench(
             k=k,
             repeats=repeats,
             profile=profile,
+            prometheus_port=prometheus_port,
+            profiler=profiler,
         )
     except _USER_FACING_ERRORS as exc:
         _handle_user_error(exc)
@@ -489,6 +717,9 @@ def _resolve_bench_out(out: Path | None) -> Path:
     return Path("results/run") / f"{stamp}-{short}"
 
 
+_SUPPORTED_PROFILERS: frozenset[str] = frozenset({"py-spy", "iostat", "ps_mem"})
+
+
 def _bench_impl(
     *,
     encoded: Path,
@@ -502,80 +733,139 @@ def _bench_impl(
     k: int,
     repeats: int,
     profile: str,
+    prometheus_port: int | None = None,
+    profiler: str | None = None,
 ) -> None:
     from vdbbench.bench import run_bench  # noqa: PLC0415
     from vdbbench.embed import load_encoded_bundle  # noqa: PLC0415
 
+    # Validate profiler choice early so the user gets a clean error.
+    if profiler is not None and profiler not in _SUPPORTED_PROFILERS:
+        raise ValueError(
+            f"unknown profiler {profiler!r}; supported: {sorted(_SUPPORTED_PROFILERS)}"
+        )
+
     out = _resolve_bench_out(out)
     console.print(f"[green]output[/]: {out}")
 
-    selected_adapters = _resolve_adapter_names(adapter)
-    run_exact = "exact" in selected_adapters
-    if all_adapters:
-        pgvector_dsn, qdrant_url, lancedb_path, chroma_path = _apply_all_defaults(
-            pgvector_dsn, qdrant_url, lancedb_path, chroma_path
+    _prom_server = None
+    if prometheus_port is not None:
+        from vdbbench import prom_metrics  # noqa: PLC0415
+
+        _prom_server = prom_metrics.start_exporter(prometheus_port)
+        console.print(
+            f"[green]prometheus[/]: scraping at http://localhost:{prometheus_port}/metrics"
         )
-    if selected_adapters:
-        pgvector_dsn, qdrant_url, lancedb_path, chroma_path = _apply_adapter_selection(
-            selected_adapters,
+
+    try:
+        selected_adapters = _resolve_adapter_names(adapter)
+        run_exact = "exact" in selected_adapters
+        if all_adapters:
+            pgvector_dsn, qdrant_url, lancedb_path, chroma_path = _apply_all_defaults(
+                pgvector_dsn, qdrant_url, lancedb_path, chroma_path
+            )
+        if selected_adapters:
+            pgvector_dsn, qdrant_url, lancedb_path, chroma_path = _apply_adapter_selection(
+                selected_adapters,
+                pgvector_dsn=pgvector_dsn,
+                qdrant_url=qdrant_url,
+                lancedb_path=lancedb_path,
+                chroma_path=chroma_path,
+            )
+
+        enc = load_encoded_bundle(encoded)
+        specs = _build_bench_specs(
             pgvector_dsn=pgvector_dsn,
             qdrant_url=qdrant_url,
             lancedb_path=lancedb_path,
             chroma_path=chroma_path,
+            run_exact=run_exact,
+            k=k,
+            repeats=repeats,
+            profile=profile,
         )
 
-    enc = load_encoded_bundle(encoded)
-    specs = _build_bench_specs(
-        pgvector_dsn=pgvector_dsn,
-        qdrant_url=qdrant_url,
-        lancedb_path=lancedb_path,
-        chroma_path=chroma_path,
-        run_exact=run_exact,
-        k=k,
-        repeats=repeats,
-        profile=profile,
-    )
-
-    if not specs:
-        console.print(
-            "[yellow]no adapters enabled[/] — pass at least one of "
-            "--pgvector-dsn / --qdrant-url / --lancedb-path / --chroma-path, "
-            "--adapter <name> (pgvector|qdrant|lancedb|chroma|exact|memory), "
-            "or --all to use sensible defaults"
-        )
-        raise typer.Exit(code=2)
-
-    console.print(f"[green]running[/] {len(specs)} specs against {enc.bundle.name}")
-    # `--all` is the "best-effort across whatever's running" entry
-    # point, so a single dead service must not kill the whole run.
-    # Single-adapter mode (the user explicitly named one DB) keeps the
-    # hard-fail behavior — there's no other adapter to keep going for.
-    #
-    # ``out=out`` wires the runner's incremental-write + partial-manifest
-    # path to the CLI: a Ctrl-C mid-run flushes the specs that already
-    # completed with ``partial=True`` stamped in ``bench_manifest.json``
-    # before the exception propagates. Without this, ``out_path`` inside
-    # the runner stayed ``None`` and the documented "Ctrl-C flushes a
-    # partial manifest" behaviour was dead code from the CLI entry.
-    # ``BenchResult.save(out)`` below is still the canonical final write
-    # — it overwrites the per-spec incremental files with the final
-    # ``partial=False`` manifest, so there's no double-write conflict.
-    result = run_bench(enc, specs, progress=True, tolerate_failures=all_adapters, out=out)
-    out_path = result.save(out)
-    console.print(f"[green]wrote[/] timings + summary to {out_path}")
-    n_ran = len(specs) - len(result.skipped)
-    if result.skipped:
-        for skip in result.skipped:
+        if not specs:
             console.print(
-                f"[yellow]skipped[/] {skip.label} ({skip.error_type}): {skip.reason}"
+                "[yellow]no adapters enabled[/] — pass at least one of "
+                "--pgvector-dsn / --qdrant-url / --lancedb-path / --chroma-path, "
+                "--adapter <name> (pgvector|qdrant|lancedb|chroma|exact|memory), "
+                "or --all to use sensible defaults"
             )
-        console.print(
-            f"[yellow]bench --all summary:[/] {n_ran}/{len(specs)} adapters ran, "
-            f"{len(result.skipped)} skipped"
-        )
-    if all_adapters and n_ran == 0:
-        console.print("[red]bench --all:[/] every adapter failed; exiting non-zero")
-        raise typer.Exit(code=1)
+            raise typer.Exit(code=2)
+
+        console.print(f"[green]running[/] {len(specs)} specs against {enc.bundle.name}")
+        # `--all` is the "best-effort across whatever's running" entry
+        # point, so a single dead service must not kill the whole run.
+        # Single-adapter mode (the user explicitly named one DB) keeps the
+        # hard-fail behavior — there's no other adapter to keep going for.
+        #
+        # ``out=out`` wires the runner's incremental-write + partial-manifest
+        # path to the CLI: a Ctrl-C mid-run flushes the specs that already
+        # completed with ``partial=True`` stamped in ``bench_manifest.json``
+        # before the exception propagates. Without this, ``out_path`` inside
+        # the runner stayed ``None`` and the documented "Ctrl-C flushes a
+        # partial manifest" behaviour was dead code from the CLI entry.
+        # ``BenchResult.save(out)`` below is still the canonical final write
+        # — it overwrites the per-spec incremental files with the final
+        # ``partial=False`` manifest, so there's no double-write conflict.
+        with _build_profiler_ctx(profiler=profiler, out=out):
+            result = run_bench(enc, specs, progress=True, tolerate_failures=all_adapters, out=out)
+        out_path = result.save(out)
+        console.print(f"[green]wrote[/] timings + summary to {out_path}")
+        n_ran = len(specs) - len(result.skipped)
+        if result.skipped:
+            for skip in result.skipped:
+                console.print(
+                    f"[yellow]skipped[/] {skip.label} ({skip.error_type}): {skip.reason}"
+                )
+            console.print(
+                f"[yellow]bench --all summary:[/] {n_ran}/{len(specs)} adapters ran, "
+                f"{len(result.skipped)} skipped"
+            )
+        if all_adapters and n_ran == 0:
+            console.print("[red]bench --all:[/] every adapter failed; exiting non-zero")
+            raise typer.Exit(code=1)
+    finally:
+        if _prom_server is not None:
+            from vdbbench import prom_metrics  # noqa: PLC0415
+
+            prom_metrics.stop_exporter(_prom_server)
+
+
+@contextlib.contextmanager
+def _build_profiler_ctx(
+    profiler: str | None, out: Path
+) -> Generator[None, None, None]:
+    """Yield inside the requested profiler context, or yield a no-op."""
+    if profiler == "py-spy":
+        from vdbbench.profile.pyspy import PySpyProfiler  # noqa: PLC0415
+
+        prof = PySpyProfiler(output_dir=out)
+        if prof.available:
+            console.print(f"[green]py-spy[/]: recording flame graph → {prof.svg_path}")
+        with prof:
+            yield
+    elif profiler == "iostat":
+        from vdbbench.profile.iostat import IostatProfiler  # noqa: PLC0415
+
+        prof_io = IostatProfiler(output_dir=out)
+        if prof_io.available:
+            console.print(f"[green]iostat[/]: recording I/O stats → {prof_io.txt_path}")
+        with prof_io:
+            yield
+    elif profiler == "ps_mem":
+        from vdbbench.profile.ps_mem import PsMemProfiler  # noqa: PLC0415
+
+        prof_mem = PsMemProfiler(output_dir=out)
+        if prof_mem.available:
+            console.print(
+                f"[green]ps_mem[/]: recording per-process memory breakdown → {prof_mem.log_path}"
+            )
+        with prof_mem:
+            yield
+    else:
+        yield
 
 
 def _resolve_plot_summary(summary: Path | None) -> Path:
@@ -590,6 +880,24 @@ def _resolve_plot_summary(summary: Path | None) -> Path:
     of a FileNotFoundError on a path the user never typed.
     """
     if summary is not None:
+        if summary.is_dir():
+            raise FileNotFoundError(
+                f"{summary} is a directory, not a parquet file. "
+                f"Did you mean '{summary}/summary.parquet'?"
+            )
+        if not summary.is_file():
+            # Infer a helpful "next command" hint from the path so users
+            # who run `make plots` before any bench get an actionable
+            # message rather than a raw FileNotFoundError traceback.
+            # Best-effort: match common scale subdir names (100k, demo,
+            # full); fall back to a generic hint for arbitrary paths.
+            scale = summary.parent.name  # e.g. "100k", "demo", "full"
+            known_scales = {"100k": "make bench-100k", "demo": "make bench-demo", "full": "make bench-1m"}
+            suggestion = known_scales.get(scale, "vdbbench bench")
+            raise FileNotFoundError(
+                f"{summary} does not exist. "
+                f"Run '{suggestion}' first to generate results."
+            )
         return summary
     root = Path("results/run")
     if not root.is_dir():
@@ -672,6 +980,337 @@ def _plot_impl(*, summary: Path, out: Path, baseline_label: str | None) -> None:
             console.print(f"[yellow]note[/]: {w.message}")
     for name, (png, svg) in paths.items():
         console.print(f"[green]{name}[/]: {png.name} + {svg.name}")
+
+
+def _parse_grid_option(grid_items: list[str]) -> dict[str, list[object]]:
+    """Parse repeated ``--grid KEY=VAL,VAL,VAL`` options into a parameter grid dict.
+
+    Each item must be ``KEY=VAL[,VAL...]``. Values are cast to int or float
+    when the conversion is unambiguous; otherwise kept as strings.
+
+    Examples::
+
+        ["ef_search=32,64,128", "m=8,16"]
+        -> {"ef_search": [32, 64, 128], "m": [8, 16]}
+    """
+    grid: dict[str, list[object]] = {}
+    for item in grid_items:
+        if "=" not in item:
+            raise ValueError(
+                f"--grid value {item!r} must be in KEY=VAL[,VAL,...] format "
+                "(example: ef_search=32,64,128)"
+            )
+        key, raw_vals = item.split("=", 1)
+        key = key.strip()
+        if not key:
+            raise ValueError(f"--grid item has an empty key: {item!r}")
+        parsed: list[object] = []
+        for raw_v in raw_vals.split(","):
+            stripped = raw_v.strip()
+            if not stripped:
+                continue
+            # Try int first, then float, then leave as string.
+            try:
+                parsed.append(int(stripped))
+            except ValueError:
+                try:
+                    parsed.append(float(stripped))
+                except ValueError:
+                    parsed.append(stripped)
+        if not parsed:
+            raise ValueError(f"--grid item {item!r} has no values after '='")
+        grid[key] = parsed
+    return grid
+
+
+@app.command()
+def sweep(
+    adapter: str = typer.Option(
+        ...,
+        "--adapter",
+        help=(
+            "Adapter to sweep. Currently only 'exact' / 'memory' run "
+            "offline (no Docker). Choices: exact, memory."
+        ),
+    ),
+    grid: list[str] = typer.Option(
+        ...,
+        "--grid",
+        help=(
+            "Grid axis in KEY=VAL,VAL,VAL format (repeatable). "
+            "Example: --grid ef_search=32,64,128 --grid m=8,16 "
+            "runs 6 trials (2 x 3). Every Cartesian product of all "
+            "--grid axes is evaluated."
+        ),
+    ),
+    encoded: Path = typer.Option(
+        Path("data/encoded"),
+        help="Encoded bundle directory (output of `vdbbench prep`).",
+    ),
+    out: Path = typer.Option(
+        Path("results/sweep"),
+        help="Directory to write sweep.parquet and sweep_pareto.{png,svg}.",
+    ),
+    top_k: int = typer.Option(10, help="Top-k for recall computation."),
+    all_adapters: bool = typer.Option(
+        False,
+        "--all",
+        help=(
+            "Sweep all configured adapters (currently not implemented; "
+            "mutually exclusive with --adapter)."
+        ),
+    ),
+) -> None:
+    """Sweep adapter index/search knobs across a Cartesian grid and plot the Pareto frontier."""
+    if all_adapters:
+        console.print("[red]error[/]: --all is not yet implemented for sweep; pass --adapter instead")
+        raise typer.Exit(code=2)
+    try:
+        _sweep_impl(
+            adapter=adapter,
+            grid=grid,
+            encoded=encoded,
+            out=out,
+            top_k=top_k,
+        )
+    except _USER_FACING_ERRORS as exc:
+        _handle_user_error(exc)
+
+
+def _sweep_impl(
+    *,
+    adapter: str,
+    grid: list[str],
+    encoded: Path,
+    out: Path,
+    top_k: int,
+) -> None:
+    import asyncio  # noqa: PLC0415
+
+    from vdbbench.plot.charts import plot_sweep_pareto  # noqa: PLC0415
+    from vdbbench.sweep import SweepSpec, run_sweep, write_sweep_parquet  # noqa: PLC0415
+
+    parameter_grid = _parse_grid_option(grid)
+    n_trials = 1
+    for vals in parameter_grid.values():
+        n_trials *= len(vals)
+
+    console.print(
+        f"[green]sweep[/]: adapter={adapter!r} grid={parameter_grid} "
+        f"({n_trials} trial{'s' if n_trials != 1 else ''})"
+    )
+
+    spec = SweepSpec(
+        adapter=adapter,
+        parameter_grid=parameter_grid,
+        dataset=str(encoded),
+        top_k=top_k,
+    )
+
+    results = asyncio.run(run_sweep(spec))
+    if not results:
+        console.print("[yellow]warning[/]: sweep produced zero results")
+        raise typer.Exit(code=1)
+
+    out.mkdir(parents=True, exist_ok=True)
+    parquet_path = write_sweep_parquet(results, out / "sweep.parquet")
+    console.print(f"[green]wrote[/] {len(results)} trial(s) to {parquet_path}")
+
+    png, svg = plot_sweep_pareto(parquet_path, out)
+    console.print(f"[green]chart[/]: {png.name} + {svg.name}")
+
+
+@app.command(name="plot-sweep")
+def plot_sweep(
+    sweep_parquet: Path = typer.Option(
+        ...,
+        "--sweep-parquet",
+        help="Path to sweep.parquet written by `vdbbench sweep`.",
+    ),
+    out: Path = typer.Option(
+        Path("results/sweep"),
+        help="Directory to write sweep_pareto.{png,svg}.",
+    ),
+) -> None:
+    """Read a sweep parquet and regenerate the Pareto-frontier scatter chart."""
+    try:
+        if not sweep_parquet.is_file():
+            raise FileNotFoundError(
+                f"{sweep_parquet} does not exist. Run 'vdbbench sweep' first."
+            )
+        from vdbbench.plot.charts import plot_sweep_pareto  # noqa: PLC0415
+
+        png, svg = plot_sweep_pareto(sweep_parquet, out)
+        console.print(f"[green]chart[/]: {png.name} + {svg.name}")
+    except _USER_FACING_ERRORS as exc:
+        _handle_user_error(exc)
+
+
+@app.command(name="compare-encoders")
+def compare_encoders(
+    adapter: str = typer.Option(
+        "exact",
+        "--adapter",
+        help=(
+            "Adapter to bench against.  Use 'exact' / 'memory' for offline "
+            "runs (no Docker).  Choices: exact, memory."
+        ),
+    ),
+    encoders: str = typer.Option(
+        "bge",
+        "--encoders",
+        help=(
+            "Comma-separated encoder shortnames to compare.  Both must be "
+            "registered in ENCODER_REGISTRY.  Example: bge,nomic.  "
+            "Default: bge (nomic requires a ~500 MB model download)."
+        ),
+    ),
+    dataset: str = typer.Option(
+        "synthetic",
+        "--dataset",
+        help=(
+            "Dataset shortname passed to the comparison runner.  "
+            "Only 'synthetic' is supported offline (no HuggingFace download). "
+            "Default: synthetic."
+        ),
+    ),
+    out: Path = typer.Option(
+        Path("results/encoder-compare"),
+        "--out",
+        help=(
+            "Output directory.  Receives ``encoder_comparison.parquet`` and "
+            "``encoder_comparison.png``.  Created if it does not exist."
+        ),
+    ),
+    corpus_size: int = typer.Option(
+        500,
+        "--corpus-size",
+        help=(
+            "Number of corpus passages for the comparison run.  "
+            "Default 500 — small enough for a fast offline smoke run."
+        ),
+    ),
+    top_k: int = typer.Option(10, "--top-k", help="Retrieval top-k for recall computation."),
+) -> None:
+    """Bench multiple encoders side-by-side and produce a comparison parquet + chart."""
+    try:
+        _compare_encoders_impl(
+            adapter=adapter,
+            encoders=encoders,
+            dataset=dataset,
+            out=out,
+            corpus_size=corpus_size,
+            top_k=top_k,
+        )
+    except _USER_FACING_ERRORS as exc:
+        _handle_user_error(exc)
+
+
+def _compare_encoders_impl(
+    *,
+    adapter: str,
+    encoders: str,
+    dataset: str,
+    out: Path,
+    corpus_size: int,
+    top_k: int,
+) -> None:
+    from vdbbench.encode.compare import (  # noqa: PLC0415
+        EncoderComparisonSpec,
+        plot_encoder_comparison,
+        run_encoder_comparison,
+    )
+
+    encoder_list = [e.strip() for e in encoders.split(",") if e.strip()]
+    if not encoder_list:
+        raise ValueError("--encoders must be a non-empty comma-separated list")
+
+    spec = EncoderComparisonSpec(
+        adapter=adapter,
+        dataset=dataset,
+        top_k=top_k,
+        encoders=tuple(encoder_list),
+        corpus_size=corpus_size,
+    )
+
+    console.print(
+        f"[green]compare-encoders[/]: adapter={adapter!r} "
+        f"encoders={encoder_list} dataset={dataset!r} corpus_size={corpus_size}"
+    )
+
+    results = run_encoder_comparison(spec, output_dir=out)
+
+    parquet_path = out / "encoder_comparison.parquet"
+    png_path = out / "encoder_comparison.png"
+    plot_encoder_comparison(parquet_path, png_path)
+
+    console.print(f"[green]wrote[/] comparison parquet → {parquet_path}")
+    console.print(f"[green]wrote[/] comparison chart  → {png_path}")
+    for r in results:
+        console.print(
+            f"  {r.encoder}: recall@{top_k}={r.recall_at_k:.3f} "
+            f"p95={r.p95_ms:.2f}ms dim={r.embedding_dim}"
+        )
+
+
+report_app = typer.Typer(
+    name="report",
+    help="Generate reports from bench results.",
+    no_args_is_help=True,
+    add_completion=False,
+)
+app.add_typer(report_app)
+
+
+@report_app.command(name="html")
+def report_html(
+    from_dir: Path = typer.Option(
+        ...,
+        "--from",
+        help=(
+            "Results directory containing summary.parquet and bench_manifest.json "
+            "(e.g. results/demo/)."
+        ),
+    ),
+    out: Path = typer.Option(
+        ...,
+        "--out",
+        help="Output path for the generated HTML report (e.g. results/demo/report.html).",
+    ),
+    charts_dir: Path | None = typer.Option(
+        None,
+        "--charts-dir",
+        help=(
+            "Optional directory of PNG chart files (e.g. assets/) to embed inline. "
+            "When omitted the charts section is skipped."
+        ),
+    ),
+) -> None:
+    """Render a self-contained HTML report from a bench results directory."""
+    try:
+        parquet_path = from_dir / "summary.parquet"
+        manifest_path = from_dir / "bench_manifest.json"
+        if not parquet_path.is_file():
+            raise FileNotFoundError(
+                f"{parquet_path} does not exist. "
+                "Run 'vdbbench bench' (or 'make bench-demo') to generate results first."
+            )
+        if not manifest_path.is_file():
+            raise FileNotFoundError(
+                f"{manifest_path} does not exist. "
+                "Run 'vdbbench bench' (or 'make bench-demo') to generate results first."
+            )
+        from vdbbench.report.html import render_html_report  # noqa: PLC0415
+
+        render_html_report(
+            parquet_path=parquet_path,
+            manifest_path=manifest_path,
+            output_path=out,
+            charts_dir=charts_dir,
+        )
+        console.print(f"[green]wrote[/] HTML report to {out}")
+    except _USER_FACING_ERRORS as exc:
+        _handle_user_error(exc)
 
 
 def main() -> None:  # pragma: no cover - thin wrapper

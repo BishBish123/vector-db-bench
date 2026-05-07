@@ -40,6 +40,25 @@ pgvector reports 4.5 MB for the index. Qdrant reports 0 because the storage layo
 
 The harness now samples RSS via `psutil` and persists `baseline_rss_bytes`, `index_rss_bytes`, `peak_rss_bytes`, and `adapter_memory_bytes` columns into `summary.parquet`. The peak is a running max across every phase (setup, ingest, build_index, warm-up, measured queries) so transient spikes that earlier landed between checkpoints can't hide; the baseline is captured before any adapter work and subtracted from every later sample, so the reported peak is the adapter-attributable delta, not the constant Python interpreter footprint. The new `memory_recall.png` chart plots that delta on the y-axis as the honest companion to the latency-vs-recall Pareto frontier.
 
+**Profiling methodology.** The harness uses two complementary memory signals: a checkpoint-based `_PeakRssTracker` (five samples per spec, cheap) and a `MemorySampler` background thread (100 ms interval, always on) that populates `adapter_memory_bytes` in the parquet. The background sampler catches sub-checkpoint transients — e.g. an HNSW build that allocates 2× the final index size mid-build and frees most of it before the next checkpoint fires. For call-stack profiling, `--profiler py-spy` wraps the bench loop in `py-spy record` and writes a flame graph SVG to the output directory (requires `pip install 'vdbbench[profile]'`; soft-fails with a warning when py-spy is not on PATH). The flame graph is the tool to reach for when `peak_rss_bytes` is high but it's not obvious which call site is responsible — open `profile.svg` in a browser and look for the widest bars in the ingest or query columns. For I/O-bound investigations, `--profiler iostat` captures continuous CPU + disk utilisation stats via the system `iostat` binary into `iostat.txt`. For a detailed memory breakdown that goes beyond RSS, `--profiler ps_mem` adds a third signal: it polls `ps_mem -p <pid>` on a daemon thread at 5-second intervals and appends timestamped snapshots to `ps_mem.log`, showing the private/shared/swap split that `MemorySampler` cannot see. The three profilers are complementary — `MemorySampler` tracks in-process RSS continuously, `ps_mem` reveals how much memory is genuinely exclusive to the bench process versus shared library pages, and `py-spy` pinpoints the call site responsible for any spike.
+
+### 4. $/M-queries: the number that closes the "which is cheaper?" question
+
+Every DB comparison eventually lands on cost. The harness now computes a `cost_per_million_queries_usd` column in `summary.parquet` using the formula:
+
+```
+qps                   = total_queries / total_query_seconds   # measured by the harness
+hourly_query_capacity = qps * 3600
+cost_per_query        = compute_per_hour_usd / hourly_query_capacity + per_query_usd
+cost_per_million      = cost_per_query * 1_000_000
+```
+
+The price inputs live in `src/vdbbench/pricing.py` and are sourced from official pricing pages (as of 2026-05). Verified numbers: Neon Scale at $0.222/CU-hour (confirmed from neon.com/pricing) and Chroma Cloud at ~$0.0075/TiB queried (confirmed from trychroma.com/pricing). Qdrant Cloud and LanceDB/S3 are marked `verified=False` — the Qdrant public page hides rates behind a calculator, and the AWS S3 page couldn't be scraped cleanly. The unverified entries are not omitted; they're flagged with a `notes` field pointing to the TODO so a future run can confirm or correct them.
+
+This is a **compute-time estimate against public price-list tiers, not a production-measured bill.** The numbers assume the smallest production-grade tier for each service and single-instance compute. Multi-tenant billing, reserved-instance discounts, and egress charges are excluded. That said, it's the same class of estimate vendors use in their own comparisons — just with the assumptions made explicit rather than buried.
+
+The bottom line from the 5K demo: at ~150 QPS on this host, pgvector on Neon Scale runs ~$0.41/M-queries. The number scales inversely with QPS — a faster host or a tuned `ef_search` that lifts QPS will reduce the $/M figure proportionally. The harness captures this because it derives cost from *measured* query time, not a theoretical rate.
+
 ## What the harness already does well
 
 Three things I'm proud of even at 5K rows:
@@ -49,6 +68,34 @@ Three things I'm proud of even at 5K rows:
 2. **The MS-MARCO loader is memory-bounded.** A naive loader materializes the 8M-row corpus in Python lists before sub-sampling, which OOMs on a laptop. Mine streams the corpus, always keeps every judged passage, and reservoir-samples unjudged via a deterministic blake2b priority hash. Memory is `O(sample_size)` regardless of corpus size.
 
 3. **`EncodedBundle.save()` doesn't allocate 40 M Python floats.** The naive way to write a 100k×384 matrix to parquet is `pa.array(vecs.tolist(), ...)`. That's ~1 GB of Python objects to garbage-collect right after. The harness uses `pa.FixedSizeListArray.from_arrays(pa.array(vecs.reshape(-1)), dim)` — straight numpy buffer to Arrow, no Python objects.
+
+## Knob-grid Pareto sweep: finding the recall-vs-latency frontier
+
+The demo numbers above use HNSW defaults — a single point in the recall-vs-latency space. The interesting picture emerges when you sweep the adapter's knobs (`ef_search`, `m`, `metric`) across a grid and ask: *for every achievable recall level, what is the lowest latency any configuration delivers?* That subset is the Pareto frontier.
+
+The harness now ships a `vdbbench sweep` command that runs every Cartesian product of a user-supplied parameter grid against the same encoded dataset and records per-trial recall@k, QPS, and p50/p95/p99 latency. A single command against the `exact` (in-process brute-force) adapter produces a 6-point frontier in under a second:
+
+```bash
+make sweep  # metric=cosine,l2 x k_neighbors=4,8,16 — 6 trials total
+```
+
+The sweep writes `results/sweep/sweep.parquet` and `results/sweep/sweep_pareto.{png,svg}`. The chart renders dominated points as open markers and the Pareto-optimal subset as filled markers connected by a line — so the frontier reads visually as "beyond this line, you're leaving performance on the table."
+
+**How to interpret the chart.** Each point is one (adapter, params) combination. The x-axis is mean recall@k; the y-axis is p95 latency on a log scale. Points to the upper-right are dominated: another configuration achieves the same recall with lower latency, or higher recall with the same latency. The Pareto-frontier line traces the non-dominated subset — the configurations worth deploying, depending on whether your application is recall-sensitive (accept higher latency for better results) or latency-sensitive (accept some recall degradation for faster responses). The gap between the frontier and any specific operating point is the performance you're leaving on the table by not tuning.
+
+The knob-grid runner is adapter-agnostic: the same `SweepSpec` / `run_sweep` API works against any adapter that follows the `VectorStoreAdapter` protocol — swap `"exact"` for `"pgvector"` and pass `ef_search=32,64,128,256` to sweep HNSW's main search-time knob on a real Postgres instance.
+
+## Published HTML report
+
+All of the above — methodology, headline metrics, charts, and per-adapter detail
+tables — is also available as a self-contained HTML file that opens in any
+browser without an internet connection or markdown renderer:
+[`results/demo/report.html`](results/demo/report.html).
+
+The report is generated by `make report` (which calls
+`vdbbench report html --from results/demo/ --out results/demo/report.html --charts-dir assets`).
+Charts are embedded as base64 `data:` URIs, so the file is truly standalone — no
+external file dependencies.
 
 ## The right way to read this benchmark
 
@@ -77,6 +124,98 @@ uv run vdbbench bench  --encoded data/encoded-demo --out results/demo \
                        --qdrant-url http://localhost:${QDRANT_PORT:-6333}
 uv run vdbbench plot   --summary results/demo/summary.parquet --out assets
 ```
+
+## 5. bge-small vs nomic: the dim/recall/latency tradeoff at a glance
+
+The harness now supports a direct encoder comparison via `vdbbench compare-encoders`.  The two registered encoders are a useful illustration of the embedding model choice tradeoff:
+
+**bge-small-en-v1.5** (`dim=384`) is a compact model (~33 M parameters) that trades some absolute quality for speed and memory efficiency.  At 384 dimensions, a 1 M-vector index costs ~1.5 GB of float32 storage.  MTEB recall scores sit in the high-40s to low-50s on retrieval benchmarks.  Latency impact is minimal — the embedding dimension is small enough that cosine distance is fast even without hardware acceleration.
+
+**nomic-embed-text-v1.5** (`dim=768`) is a larger model that doubles the embedding space.  The 768-dim representation carries more semantic signal: MTEB retrieval scores typically land 8–12 points above bge-small.  The cost is doubled index memory (~3 GB per 1 M vectors), slightly higher ingest throughput cost (more bytes to write), and marginally higher query latency (longer vectors = more FLOP per dot product).  On the 5 K-vector demo the latency difference is noise; on a 1 M-vector MS-MARCO sweep you will see a measurable gap.
+
+The key tradeoff is rarely "which encoder is better" in isolation.  It is "what recall improvement per GB of index RAM and per millisecond of query latency does the larger model buy you?"  For most applications, bge-small's recall is already good enough and the 2× memory savings are significant at 100 k+ vectors.  The `compare-encoders` command makes that tradeoff visible without running two full bench pipelines by hand.
+
+> **Offline note:** The committed smoke artifact at `results/encoder-compare/encoder_comparison.parquet` uses bge only, because nomic requires a ~500 MB model download and `trust_remote_code=True`.  Run `make compare-encoders ENCODERS=bge,nomic` to produce the full two-encoder comparison locally.
+
+## Containerised reproducibility: one command, no excuses
+
+The 5K-demo numbers are believable only if a stranger can reproduce them on a
+different machine and get the same answer within measurement noise.  "Clone and
+run `make bench-demo`" is one answer, but it puts Python, uv, and Docker
+management on the reviewer — and version drift in any layer silently
+invalidates the comparison.
+
+The repo now ships a `Dockerfile` (multi-stage: `builder` stage installs uv
+and resolves the lockfile via `uv sync --frozen`; `runtime` stage copies
+site-packages and the source tree onto python:3.12-slim) and a
+`docker-compose.full.yml` that wires together `pgvector/pgvector:0.8.0-pg17`,
+`qdrant/qdrant:v1.17.0`, and the `vdbbench` image with startup-order
+guarantees via `depends_on: condition: service_healthy`.  A single command
+runs the full pipeline:
+
+```bash
+./scripts/reproduce.sh
+```
+
+The script builds the image, brings up the stack, runs the bench, and — the
+part that actually catches drift — diffs the produced `summary.parquet` against
+the committed `results/demo/summary.parquet` baseline.  It exits non-zero if
+p95 latency deviates more than 50 % or recall@10 deviates more than 0.05
+absolute from the reference.  Tolerances are explicit (configurable via env
+vars) rather than silent — when a reviewer gets a green exit they know
+*exactly* what "reproduces" means.
+
+The drift check works because parquet preserves schema: both the reference and
+the reproduction carry the same column set (`db`, `latency_ms_p95`,
+`recall_at_k_mean`, …), so a pandas `groupby("db").iloc[0]` comparison is
+stable across runs even when row order differs.  Missing adapters (e.g. a
+reviewer without lancedb wheels) are flagged explicitly rather than silently
+passed.
+
+A GitHub Actions workflow (`.github/workflows/reproducibility.yml`) runs the
+smoke path (`--smoke-only`, exact adapter, no Docker-in-Docker) on every push
+to `main` and weekly, so drift is caught automatically before it reaches users.
+
+## The 1M MS-MARCO benchmark: methodology, reproduction, and interpreting the placeholder
+
+The demo run (5 000 synthetic vectors) exercises every code path but is too small to
+discriminate the adapters.  The interesting curves — where recall@10 drops below 1.0, where
+HNSW beats IVF on latency but loses on throughput, where `ef_search` tuning shifts the Pareto
+frontier — only appear at ≥100 k vectors on a real retrieval corpus.
+
+**The 1M run** uses the full MS-MARCO passage corpus (8.8 M passages; the `--limit 1000000`
+flag keeps every judged passage and reservoir-samples the rest to exactly 1 M) encoded with
+`BAAI/bge-small-en-v1.5` (384-dim).  The pipeline is:
+
+1. `vdbbench prep --dataset msmarco --limit 1000000 --out data/encoded-1m` — streams the HF
+   dataset, encodes with bge-small, writes a parquet bundle with ground-truth qrels.
+2. `vdbbench bench --all ...` — drives pgvector, qdrant, lancedb, and chroma through the same
+   `setup → ingest → build_index → warm-up → search × repeats → teardown` lifecycle.
+3. `vdbbench report html` — produces a self-contained HTML report.
+4. `vdbbench plot` — regenerates the Pareto frontier and per-adapter bar charts.
+
+The entire pipeline is automated by `scripts/run_1m_bench.sh` (press one button) and
+mirrored as a GitHub Actions `workflow_dispatch` workflow at
+`.github/workflows/full_bench.yml`.
+
+**How to reproduce the 1M run on appropriate hardware** (Linux, ≥50 GB disk, ≥16 GB RAM):
+
+```bash
+./scripts/run_1m_bench.sh          # full pipeline, ~4-8 h
+./scripts/run_1m_bench.sh --dry-run  # print every step without executing
+make bench-1m-real                 # same, via Make
+```
+
+**How to interpret the "not yet measured" placeholder.**  Until a 1M run is published,
+`MEASURED-ON.md` carries a `## Full run (1M MS-MARCO) — NOT YET MEASURED` section.  This
+is intentional: the repo ships the harness and the automation; the numbers come from the
+hardware.  Once a run completes, the operator fills in the `bench_manifest.json` fields into
+`MEASURED-ON.md` and commits `results/1m/run-<YYYYMMDD>/summary.parquet` alongside.  The
+Pareto frontier charts in `assets/1m/` become the canonical comparison.
+
+Until then, the demo numbers (5 K vectors) are the published reference and are honestly
+labelled as a smoke test.  The 1M recipe is reproducible — it just hasn't been run on
+publication-grade hardware yet.
 
 ## Source
 

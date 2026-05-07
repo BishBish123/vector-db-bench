@@ -76,10 +76,12 @@ class QdrantAdapter:
         url: str = "http://localhost:6333",
         collection: str = "vdbbench_vectors",
         api_key: str | None = None,
+        timeout: float | None = None,
     ) -> None:
         self._url = url
         self._collection = collection
         self._api_key = api_key
+        self._timeout = timeout
         self._dim: int | None = None
         self._params: dict[str, object] = {}
         self._distance: str = "Cosine"
@@ -298,6 +300,18 @@ class QdrantAdapter:
         # Same caveat as pgvector — sample from outside (`docker stats`).
         return 0
 
+    def cleanup_partial_setup(self) -> None:
+        # Qdrant is a service adapter — all state lives in the Qdrant service,
+        # not on the local filesystem, so there is nothing for the adapter to
+        # remove on a failed setup().
+        #
+        # Callers might wonder: "shouldn't we call teardown() to delete the
+        # partially-created collection?"  The bench runner deliberately avoids
+        # that — teardown() assumes a completed setup().  Any partial collection
+        # is cleaned up by the next setup() call's own delete_collection step
+        # (which is wrapped in contextlib.suppress so it is safe if absent).
+        return
+
     # ---------- internals ----------
 
     def _connect(self) -> QdrantClient:
@@ -305,5 +319,8 @@ class QdrantAdapter:
             return self._client
         from qdrant_client import QdrantClient  # noqa: PLC0415
 
-        self._client = QdrantClient(url=self._url, api_key=self._api_key)
+        kwargs: dict[str, object] = {"url": self._url, "api_key": self._api_key}
+        if self._timeout is not None:
+            kwargs["timeout"] = self._timeout
+        self._client = QdrantClient(**kwargs)  # type: ignore[arg-type]
         return self._client

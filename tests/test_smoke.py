@@ -678,3 +678,181 @@ def test_cli_bench_single_adapter_still_hard_fails(tmp_path: Path) -> None:
             ],
         )
     assert result.exit_code != 0
+
+
+# ---------------------------------------------------------------------------
+# --encoder flag on `prep` (R7 audit additions)
+# ---------------------------------------------------------------------------
+
+
+def _make_tiny_corpus_bundle() -> object:
+    """Return a minimal CorpusBundle for encoder CLI tests."""
+    from vdbbench.corpus.bundle import CorpusBundle  # noqa: PLC0415
+
+    return CorpusBundle(
+        name="tiny",
+        passages=pd.DataFrame({"pid": ["p0"], "text": ["hello"]}),
+        queries=pd.DataFrame({"qid": ["q0"], "text": ["world"]}),
+        qrels=pd.DataFrame({"qid": ["q0"], "pid": ["p0"], "relevance": [1]}),
+    )
+
+
+def test_cli_prep_encoder_bge_flag_works(tmp_path: Path) -> None:
+    """`vdbbench prep --encoder bge` routes through build_encoder() without downloading.
+
+    Uses --dataset msmarco (with mocked load_msmarco + encode_corpus) so the
+    encoder branch is actually exercised. Synthetic bypasses the encoder entirely.
+    """
+    from unittest.mock import MagicMock  # noqa: PLC0415
+
+    from vdbbench.embed.encoder import FakeEncoder, encode_corpus  # noqa: PLC0415
+
+    bundle = _make_tiny_corpus_bundle()
+    fake_enc = FakeEncoder(dim=16)
+    mock_build = MagicMock(return_value=fake_enc)
+
+    def _fake_encode_corpus(b: object, enc: object, **kw: object) -> object:
+        return encode_corpus(bundle, FakeEncoder(dim=16), **kw)
+
+    with (
+        patch("vdbbench.corpus.load_msmarco", return_value=bundle),
+        patch("vdbbench.embed.registry.build_encoder", mock_build),
+        patch("vdbbench.embed.encode_corpus", _fake_encode_corpus),
+    ):
+        result = CliRunner().invoke(
+            app,
+            [
+                "prep",
+                "--out",
+                str(tmp_path / "encoded"),
+                "--dataset",
+                "msmarco",
+                "--encoder",
+                "bge",
+            ],
+        )
+    mock_build.assert_called_once_with("bge")
+    assert result.exit_code == 0, result.output
+
+
+def test_cli_prep_encoder_nomic_flag_works(tmp_path: Path) -> None:
+    """`vdbbench prep --encoder nomic` routes through build_encoder('nomic').
+
+    Verifies that build_encoder is called with 'nomic' so trust_remote_code=True
+    is propagated (the registry already has the right shape — tested in
+    test_encoder_registry.py). Using --dataset msmarco so the encoder branch runs.
+    """
+    from unittest.mock import MagicMock  # noqa: PLC0415
+
+    from vdbbench.embed.encoder import FakeEncoder, encode_corpus  # noqa: PLC0415
+
+    bundle = _make_tiny_corpus_bundle()
+    fake_enc = FakeEncoder(dim=16)
+    mock_build = MagicMock(return_value=fake_enc)
+
+    def _fake_encode_corpus(b: object, enc: object, **kw: object) -> object:
+        return encode_corpus(bundle, FakeEncoder(dim=16), **kw)
+
+    with (
+        patch("vdbbench.corpus.load_msmarco", return_value=bundle),
+        patch("vdbbench.embed.registry.build_encoder", mock_build),
+        patch("vdbbench.embed.encode_corpus", _fake_encode_corpus),
+    ):
+        result = CliRunner().invoke(
+            app,
+            [
+                "prep",
+                "--out",
+                str(tmp_path / "encoded"),
+                "--dataset",
+                "msmarco",
+                "--encoder",
+                "nomic",
+            ],
+        )
+    mock_build.assert_called_once_with("nomic")
+    assert result.exit_code == 0, result.output
+
+
+def test_cli_prep_encoder_and_embed_model_both_set_exits_nonzero(tmp_path: Path) -> None:
+    """`--encoder` and `--embed-model` together are mutually exclusive → exit 2 with hint."""
+    result = CliRunner().invoke(
+        app,
+        [
+            "prep",
+            "--out",
+            str(tmp_path / "encoded"),
+            "--dataset",
+            "synthetic",
+            "--encoder",
+            "bge",
+            "--embed-model",
+            "BAAI/bge-small-en-v1.5",
+        ],
+    )
+    # Pin the exact UX contract: typer.BadParameter exits with code 2 and the
+    # error message must name both flags so the user can correct in one step.
+    assert result.exit_code == 2, result.output
+    output_text = (result.output or "") + str(result.exception or "")
+    assert "--encoder" in output_text and "--embed-model" in output_text
+
+
+def test_cli_prep_encoder_flag_in_help() -> None:
+    """`vdbbench prep --help` must advertise the new --encoder flag."""
+    result = CliRunner().invoke(app, ["prep", "--help"])
+    assert result.exit_code == 0, result.output
+    assert "--encoder" in result.output
+
+
+def test_cli_bench_prom_exporter_stopped_after_exit(tmp_path: Path) -> None:
+    """After `bench` exits, stop_exporter must have been called so the port is freed.
+
+    Uses a real WSGIServer via start_exporter to verify the lifecycle — not just
+    a mock — so we can confirm the port is released on normal exit.
+    """
+    import socket  # noqa: PLC0415
+    import time  # noqa: PLC0415
+
+    def _find_free_port() -> int:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.bind(("127.0.0.1", 0))
+            return s.getsockname()[1]
+
+    def _port_is_listening(port: int) -> bool:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.settimeout(0.5)
+            return s.connect_ex(("127.0.0.1", port)) == 0
+
+    port = _find_free_port()
+
+    fake_run = _make_fake_run_bench()
+    out = tmp_path / "results"
+    runner = CliRunner()
+    with (
+        patch("vdbbench.embed.load_encoded_bundle", _stub_load_encoded_bundle),
+        patch("vdbbench.bench.run_bench", fake_run),
+    ):
+        result = runner.invoke(
+            app,
+            [
+                "bench",
+                "--encoded",
+                str(tmp_path / "encoded"),
+                "--out",
+                str(out),
+                "--adapter",
+                "exact",
+                "--prometheus-port",
+                str(port),
+            ],
+        )
+    assert result.exit_code == 0, result.output
+    # Port must be released after bench exits.
+    deadline = time.monotonic() + 2.0
+    released = False
+    while time.monotonic() < deadline:
+        if not _port_is_listening(port):
+            released = True
+            break
+        time.sleep(0.05)
+    assert released, f"port {port} still listening after bench exit — stop_exporter not called"

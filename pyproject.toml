@@ -72,6 +72,11 @@ lance = [
     "lancedb>=0.13 ; (sys_platform == 'darwin' and platform_machine == 'arm64') or sys_platform == 'linux' or sys_platform == 'win32'",
 ]
 
+# Wikipedia corpus streaming (the `datasets` library). Already present in the
+# base deps, but declared here so `uv sync --extra wiki` is the documented
+# install path and the dep can be removed from base when/if desired.
+wiki = ["datasets>=2.20"]
+
 # Convenience: every adapter at once. Resolves only on supported platforms.
 all-adapters = [
     "vdbbench[embed,chroma,lance]",
@@ -88,6 +93,16 @@ dev = [
     "ipykernel>=6.29",
     "jupyter>=1.0",
 ]
+
+# Notebook analysis — regenerates charts from results/demo/summary.parquet.
+# Install with: uv sync --extra plot
+# Then run: make analysis
+plot = ["matplotlib>=3.8", "jupyter>=1.0", "nbclient>=0.10"]
+
+# Profiling extras — py-spy for flame graphs (opt-in, not in base deps).
+# Install with: pip install "vdbbench[profile]"
+# Then use: vdbbench bench --profiler py-spy
+profile = ["py-spy>=0.4"]
 
 [build-system]
 requires = ["hatchling>=1.25"]

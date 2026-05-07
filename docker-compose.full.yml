@@ -1,0 +1,98 @@
+# Full reproducibility stack: pgvector + qdrant + vdbbench.
+#
+# Usage:
+#   docker compose -f docker-compose.full.yml up --build
+#
+# Or via the Makefile:
+#   make reproduce           (calls scripts/reproduce.sh which wraps this)
+#   make docker-run          (alias for the above compose up)
+#
+# Versions are pinned so results can be reproduced exactly.
+# See docker-compose.yml for the development-only (no vdbbench service) variant.
+
+services:
+  pgvector:
+    image: pgvector/pgvector:0.8.0-pg17
+    container_name: vdbbench-full-pgvector
+    environment:
+      POSTGRES_USER: bench
+      POSTGRES_PASSWORD: bench
+      POSTGRES_DB: bench
+    ports:
+      - "${PGVECTOR_PORT:-5433}:5432"
+    shm_size: 1g
+    volumes:
+      - pgvector_full_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U bench -d bench"]
+      interval: 5s
+      timeout: 5s
+      retries: 15
+    command:
+      - postgres
+      - -c
+      - shared_buffers=512MB
+      - -c
+      - work_mem=64MB
+      - -c
+      - maintenance_work_mem=512MB
+      - -c
+      - effective_cache_size=2GB
+      - -c
+      - max_parallel_workers_per_gather=2
+
+  qdrant:
+    image: qdrant/qdrant:v1.17.0
+    container_name: vdbbench-full-qdrant
+    ports:
+      - "${QDRANT_PORT:-6333}:6333"
+      - "${QDRANT_GRPC_PORT:-6334}:6334"
+    volumes:
+      - qdrant_full_data:/qdrant/storage
+    healthcheck:
+      test:
+        ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/localhost/6333 && exec 3<&- 3>&-' || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 15
+
+  vdbbench:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: vdbbench:latest
+    container_name: vdbbench-runner
+    depends_on:
+      pgvector:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+    environment:
+      # Connection strings point at the sibling service containers by
+      # service name — Docker's internal DNS resolves them automatically.
+      PGVECTOR_DSN: postgresql://bench:bench@pgvector:5432/bench
+      QDRANT_URL: http://qdrant:6333
+    volumes:
+      # Mount host paths so results land on the host after the container exits.
+      # Callers pass absolute paths; the Makefile and reproduce.sh do this.
+      - ${RESULTS_DIR:-./results/reproduced}:/app/results
+      - ${DATA_DIR:-./data}:/app/data
+    # Run the 2-adapter smoke benchmark against both services.
+    # Override via: docker compose -f docker-compose.full.yml run vdbbench bench ...
+    command:
+      - bench
+      - --adapter
+      - pgvector,qdrant
+      - --encoded
+      - /app/data/encoded-demo
+      - --out
+      - /app/results
+      - --pgvector-dsn
+      - postgresql://bench:bench@pgvector:5432/bench
+      - --qdrant-url
+      - http://qdrant:6333
+    restart: "no"
+
+volumes:
+  pgvector_full_data:
+  qdrant_full_data:

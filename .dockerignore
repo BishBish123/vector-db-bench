@@ -1,0 +1,58 @@
+# ── Python artefacts ─────────────────────────────────────────────────────────
+.venv/
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+*.egg
+
+# ── Test + quality tooling ────────────────────────────────────────────────────
+tests/
+evals/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# ── Documentation ─────────────────────────────────────────────────────────────
+docs/
+
+# ── Version control ───────────────────────────────────────────────────────────
+.git/
+.gitignore
+.gitattributes
+
+# ── IDE / editor ──────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# ── CI ────────────────────────────────────────────────────────────────────────
+.github/
+
+# ── Notebooks (not needed in the image) ──────────────────────────────────────
+*.ipynb
+analysis.executed.ipynb
+
+# ── Large result outputs (not baseline) ───────────────────────────────────────
+# Keep results/demo/ — it is the committed reference baseline used by
+# scripts/reproduce.sh for the parquet drift check.
+results/100k/
+results/full/
+results/run/
+results/reproduced/
+results/sweep/
+results/encoder-compare/
+results/profile-demo/
+results/profile-demo-mem/
+
+# ── Encoded data bundles — callers volume-mount /app/data at runtime ──────────
+data/
+smoke-out/
+smoke-out-wiki/

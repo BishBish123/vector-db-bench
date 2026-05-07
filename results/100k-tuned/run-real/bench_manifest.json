@@ -1,0 +1,66 @@
+{
+  "adapter_versions": {
+    "exact": "unknown",
+    "pgvector": "pgvector==0.4.2",
+    "qdrant": "qdrant-client==1.17.1"
+  },
+  "bench_completed_at": "2026-05-07T22:15:44.762140+00:00",
+  "bench_specs": [
+    {
+      "adapter": "pgvector",
+      "k": 10,
+      "label": "pgvector:hnsw-ef256",
+      "params": {
+        "ef_construction": 64,
+        "ef_search": 256,
+        "index": "hnsw",
+        "m": 16,
+        "metric": "cosine"
+      },
+      "params_hash": "6f8b6025624059e5",
+      "profile": "warm",
+      "repeats": 1,
+      "warmup_queries": 10
+    },
+    {
+      "adapter": "qdrant",
+      "k": 10,
+      "label": "qdrant:hnsw-default",
+      "params": {
+        "metric": "cosine"
+      },
+      "params_hash": "e44dff8986f66cb8",
+      "profile": "warm",
+      "repeats": 1,
+      "warmup_queries": 10
+    },
+    {
+      "adapter": "exact",
+      "k": 10,
+      "label": "exact:bruteforce",
+      "params": {
+        "metric": "cosine"
+      },
+      "params_hash": "e44dff8986f66cb8",
+      "profile": "warm",
+      "repeats": 1,
+      "warmup_queries": 10
+    }
+  ],
+  "bench_started_at": "2026-05-07T22:15:44.410294+00:00",
+  "encoded_bundle_fingerprint": "9dcb00839c11969f9472032aac7e667f",
+  "encoder_dim": 384,
+  "encoder_name": "synthetic-gaussian",
+  "host_metadata": {
+    "cpu_count": 8,
+    "machine": "x86_64",
+    "platform": "macOS-15.7.4-x86_64-i386-64bit",
+    "processor": "i386",
+    "python_implementation": "CPython",
+    "python_version": "3.12.13",
+    "total_memory_bytes": 8589934592
+  },
+  "partial": true,
+  "schema_version": 1,
+  "vdbbench_version": "0.1.0"
+}

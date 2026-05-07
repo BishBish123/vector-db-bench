@@ -376,6 +376,17 @@ class PgVectorAdapter:
         # outside (e.g. `docker stats`) instead.
         return 0
 
+    def cleanup_partial_setup(self) -> None:
+        # pgvector is a service adapter — no filesystem state is written by
+        # setup(), so there is nothing to remove on failure.
+        #
+        # Callers might wonder: "shouldn't we call teardown() to DROP TABLE?"
+        # The bench runner deliberately avoids that — teardown() assumes a
+        # completed setup() (i.e. self._conn is non-None).  Calling it after a
+        # failed setup() would be undefined behaviour.  The partial table, if
+        # any, is handled by the next setup() call's own DROP TABLE IF EXISTS.
+        return
+
     # ---------- internals ----------
 
     def _open_connection(self) -> Any:

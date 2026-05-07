@@ -10,6 +10,15 @@ UV ?= uv
 SAMPLE_SIZE ?= 100000
 EMBED_MODEL ?= BAAI/bge-small-en-v1.5
 
+# ENCODER selects which embedding model to use for `make bench-demo`.
+# Choices: bge (default, 384-dim) | nomic (768-dim, requires trust_remote_code)
+# Example: make bench-demo ENCODER=nomic
+ENCODER ?= bge
+# Derive EMBED_MODEL from ENCODER when not set explicitly.
+ifeq ($(ENCODER),nomic)
+  EMBED_MODEL := nomic-ai/nomic-embed-text-v1.5
+endif
+
 # Container ports — overridable so collisions with an existing local
 # Postgres / Qdrant don't force the user to edit docker-compose.yml.
 # `make up PGVECTOR_PORT=5444 QDRANT_PORT=6343` is the documented escape
@@ -116,16 +125,26 @@ smoke: ## End-to-end offline smoke (no Docker, no model download) — exercises 
 	$(UV) run python scripts/smoke_pipeline.py
 
 .PHONY: bench-demo
-bench-demo: ## Demo pipeline reproducing the README numbers: synthetic 5k vectors @ dim=64, writes results/demo/
+bench-demo: ## Demo pipeline: synthetic 5k vectors @ dim=64, writes results/demo/. ENCODER=bge|nomic
 	@# The committed `results/demo/summary.parquet` was captured on an
 	@# Intel macOS host where lancedb and chromadb have no wheels, so it
 	@# contains 2 rows (pgvector + qdrant). A run on Linux / Apple
 	@# Silicon / WSL2 will produce 4 rows; that's a wider sweep, not a
 	@# regression. See the README's "Platform support" table.
+	@# Use ENCODER=nomic to swap in the 768-dim nomic model (requires
+	@# trust_remote_code and a ~500 MB model download on first run).
 	$(UV) run vdbbench prep  --out data/encoded-demo --dataset synthetic --sample-size 5000 --dim 64
 	$(UV) run vdbbench bench --encoded data/encoded-demo --out results/demo --all \
 		--pgvector-dsn $(PGVECTOR_DSN) --qdrant-url $(QDRANT_URL)
 	$(UV) run vdbbench plot  --summary results/demo/summary.parquet --out assets
+
+.PHONY: bench-demo-nomic
+bench-demo-nomic: ## Demo with nomic-embed-text-v1.5 (768-dim). Alias for: make bench-demo ENCODER=nomic
+	@# nomic-embed-text-v1.5 is a 768-dim SBERT-compatible model.
+	@# First run downloads ~500 MB of model weights from HuggingFace.
+	@# The model requires trust_remote_code=True (custom modeling file).
+	@# Read https://huggingface.co/nomic-ai/nomic-embed-text-v1.5 before use.
+	$(MAKE) bench-demo ENCODER=nomic EMBED_MODEL=nomic-ai/nomic-embed-text-v1.5
 
 .PHONY: bench-100k
 bench-100k: prep bench plots ## 100k-scale sweep (uses SAMPLE_SIZE/EMBED_MODEL); writes results/100k/
@@ -137,9 +156,24 @@ bench-1m: ## Full 1M MS-MARCO sweep (results/full/summary.parquet; ~hours, no co
 		--pgvector-dsn $(PGVECTOR_DSN) --qdrant-url $(QDRANT_URL)
 	$(UV) run vdbbench plot  --summary results/full/summary.parquet --out assets/full
 
+.PHONY: bench-all
+bench-all: bench-1m  ## Run the full 1M benchmark (alias for bench-1m)
+
+.PHONY: bench-1m-real
+bench-1m-real: ## Full 1M automated pipeline via scripts/run_1m_bench.sh (press-one-button reproduction)
+	@# Requires Docker running, ≥50 GB free disk, ≥16 GB RAM.
+	@# Estimated wall-clock: 4-8 h on a 4-core shared-cpu-1x host.
+	@# Use --skip-prep if data/encoded-1m already exists from a previous run.
+	@# Use --dry-run to print the steps without executing.
+	./scripts/run_1m_bench.sh
+
 .PHONY: plots
 plots: ## Regenerate analysis plots from results/100k/summary.parquet
 	$(UV) run vdbbench plot --summary results/100k/summary.parquet --out assets/100k
+
+.PHONY: report
+report: ## Render the demo HTML report → results/demo/report.html (self-contained, no external deps)
+	$(UV) run vdbbench report html --from results/demo/ --out results/demo/report.html --charts-dir assets
 
 # ---------------------------------------------------------------------------
 # Containers
@@ -199,7 +233,96 @@ ps: ## Show container status
 # ---------------------------------------------------------------------------
 # Hygiene
 # ---------------------------------------------------------------------------
+.PHONY: sweep
+sweep: ## Knob-grid Pareto sweep — exact adapter, tiny grid (6 trials), writes results/sweep/
+	@# Runs entirely offline (no Docker). Produces results/sweep/sweep.parquet
+	@# and results/sweep/sweep_pareto.{png,svg} so the README reference resolves.
+	@# Uses smoke-out/encoded — the bundle produced by scripts/smoke_pipeline.py.
+	$(UV) run vdbbench sweep \
+		--adapter exact \
+		--grid metric=cosine,l2 \
+		--grid k_neighbors=4,8,16 \
+		--encoded smoke-out/encoded \
+		--out results/sweep
+
+# ---------------------------------------------------------------------------
+# Analysis notebook
+# ---------------------------------------------------------------------------
+.PHONY: analysis
+analysis: ## Execute analysis.ipynb and regenerate assets/analysis-*.png
+	$(UV) run jupyter nbconvert --to notebook --execute analysis.ipynb \
+		--output analysis.executed.ipynb
+	@echo "Executed notebook written to analysis.executed.ipynb"
+	@echo "Charts written to assets/analysis-*.png"
+
+.PHONY: profile-demo
+profile-demo: ## Flame-graph run: exact adapter, smoke encoded data → results/profile-demo/ (requires py-spy)
+	@# Runs entirely offline (no Docker). Produces results/profile-demo/profile.svg
+	@# alongside summary.parquet and timings.parquet. Requires py-spy:
+	@#   pip install "vdbbench[profile]"  or  uv sync --extra profile
+	@# Uses the smoke-out/encoded bundle produced by scripts/smoke_pipeline.py.
+	@# If smoke-out/encoded does not exist, run `make smoke` first.
+	$(UV) run vdbbench bench \
+		--adapter exact \
+		--profiler py-spy \
+		--encoded smoke-out/encoded \
+		--out results/profile-demo
+
+.PHONY: profile-demo-mem
+profile-demo-mem: ## ps_mem memory-breakdown run: exact adapter, smoke encoded data → results/profile-demo-mem/ (requires ps_mem)
+	@# Runs entirely offline (no Docker). Produces results/profile-demo-mem/ps_mem.log
+	@# with timestamped per-process memory snapshots (private/shared/swap breakdown)
+	@# alongside summary.parquet and timings.parquet. Requires the ps_mem system binary:
+	@#   macOS:  brew install ps_mem
+	@#   Linux:  sudo apt install ps_mem
+	@# Uses the smoke-out/encoded bundle produced by scripts/smoke_pipeline.py.
+	@# If smoke-out/encoded does not exist, run `make smoke` first.
+	$(UV) run vdbbench bench \
+		--adapter exact \
+		--profiler ps_mem \
+		--encoded smoke-out/encoded \
+		--out results/profile-demo-mem
+
+# ---------------------------------------------------------------------------
+# Encoder comparison
+# ---------------------------------------------------------------------------
+# ENCODERS selects which embedding models to compare.
+# Default: bge only (nomic requires ~500 MB model download + trust_remote_code).
+# To add nomic: make compare-encoders ENCODERS=bge,nomic
+ENCODERS ?= bge
+
+.PHONY: compare-encoders
+compare-encoders: ## Side-by-side encoder comparison (bge vs nomic). Default ENCODERS=bge. No Docker needed.
+	@# Runs entirely offline (no Docker) with ENCODERS=bge (the default).
+	@# The smoke artifact at results/encoder-compare/ uses bge only because
+	@# nomic requires a ~500 MB model download and trust_remote_code=True.
+	@# To run both encoders: make compare-encoders ENCODERS=bge,nomic
+	@# (reads the model card at https://huggingface.co/nomic-ai/nomic-embed-text-v1.5
+	@#  before enabling nomic in a security-sensitive environment).
+	$(UV) run vdbbench compare-encoders \
+		--adapter exact \
+		--encoders $(ENCODERS) \
+		--dataset synthetic \
+		--out results/encoder-compare
+
 .PHONY: clean
 clean: ## Remove caches and build artifacts
 	rm -rf .pytest_cache .mypy_cache .ruff_cache .coverage htmlcov build dist
 	find . -name __pycache__ -type d -exec rm -rf {} +
+
+# ---------------------------------------------------------------------------
+# Docker / Reproducibility
+# ---------------------------------------------------------------------------
+.PHONY: docker-build
+docker-build: ## Build the vdbbench Docker image (multi-stage, production deps only)
+	docker build --tag vdbbench:latest .
+
+.PHONY: docker-run
+docker-run: ## Bring up the full stack (pgvector + qdrant + vdbbench) and run the bench
+	@# Requires the encoded bundle at data/encoded-demo. Run `make bench-demo` or
+	@# `uv run vdbbench prep ...` first to produce it, then re-run this target.
+	docker compose -f docker-compose.full.yml up --build
+
+.PHONY: reproduce
+reproduce: ## Build image + run full stack + diff results against results/demo/ baseline
+	./scripts/reproduce.sh

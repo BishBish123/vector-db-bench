@@ -11,7 +11,7 @@ import pandas as pd
 import pytest
 
 from vdbbench.adapters.base import IndexStats, IngestStats
-from vdbbench.bench.runner import BenchSpec, _PeakRssTracker, run_bench
+from vdbbench.bench.runner import BenchSpec, _build_summary, _PeakRssTracker, run_bench
 from vdbbench.corpus.bundle import CorpusBundle
 from vdbbench.embed.encoder import EncodedBundle, FakeEncoder, encode_corpus
 
@@ -748,9 +748,6 @@ class TestQpsEstimateZeroLatency:
 
     @staticmethod
     def _summary(latencies_ms: list[float]):
-        from vdbbench.adapters.base import IndexStats, IngestStats
-        from vdbbench.bench.runner import BenchSpec, _build_summary
-
         spec = BenchSpec(adapter=_MemAdapter(), k=1, repeats=1)
         encoded = _toy_encoded()
         ingest = IngestStats(n_vectors=encoded.bundle.n_passages, elapsed_s=0.001)

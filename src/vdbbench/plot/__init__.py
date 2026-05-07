@@ -5,6 +5,7 @@ from vdbbench.plot.charts import (
     plot_axis_bars,
     plot_pareto_frontier,
     plot_speedup_vs_baseline,
+    plot_sweep_pareto,
 )
 
 __all__ = [
@@ -12,4 +13,5 @@ __all__ = [
     "plot_axis_bars",
     "plot_pareto_frontier",
     "plot_speedup_vs_baseline",
+    "plot_sweep_pareto",
 ]

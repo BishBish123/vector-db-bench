@@ -1,0 +1,103 @@
+name: full-bench-1m
+
+# Triggered manually only — a 1M MS-MARCO run takes 4-8 h and costs
+# real money; never run it automatically on push or schedule.
+#
+# Hardware requirement: ubuntu-latest-8-cores (8-core, 32 GB) GitHub
+# Actions large runner.  The default 2-core runner (ubuntu-latest) will
+# OOM on the HNSW index build over 1M vectors.  To use this workflow,
+# ensure your repository has access to a large runner and update the
+# `runs-on` value below if your organisation uses a different label.
+#
+# Usage:
+#   GitHub UI: Actions -> "full-bench-1m" -> "Run workflow"
+#   gh CLI:
+#     gh workflow run full_bench.yml
+#     gh workflow run full_bench.yml -f skip_prep=true
+
+on:
+  workflow_dispatch:
+    inputs:
+      skip_prep:
+        description: "Skip vdbbench prep (use cached encoded bundle from previous run)"
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+
+permissions:
+  contents: read
+
+jobs:
+  bench-1m:
+    # Large runner: 8-core, 32 GB RAM.
+    # Replace with your organisation's large-runner label if different.
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+
+      - name: Set up Python 3.12
+        run: uv python install 3.12
+
+      - name: Sync production + dev deps
+        run: uv sync --extra dev --python 3.12
+
+      # Pre-pull docker images before the script runs so the
+      # docker compose up --wait step doesn't time out on the first pull.
+      - name: Pre-pull docker images
+        run: docker compose -f docker-compose.full.yml pull
+
+      - name: Run 1M MS-MARCO benchmark
+        env:
+          PGVECTOR_DSN: postgresql://bench:bench@localhost:5433/bench
+          QDRANT_URL: http://localhost:6333
+          # Use an env var to pass workflow_dispatch input into the shell
+          # safely — never interpolate github context expressions directly
+          # into run: commands.
+          INPUT_SKIP_PREP: ${{ inputs.skip_prep }}
+        run: |
+          FLAGS=""
+          if [[ "$INPUT_SKIP_PREP" == "true" ]]; then
+            FLAGS="--skip-prep"
+          fi
+          ./scripts/run_1m_bench.sh $FLAGS
+
+      - name: Upload results as workflow artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-1m-results-${{ github.run_id }}
+          path: results/1m/
+          retention-days: 90
+
+      - name: Upload charts as workflow artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-1m-assets-${{ github.run_id }}
+          path: assets/1m/
+          retention-days: 90
+
+      # Optional: create a GitHub Release with the results so they are
+      # permanently accessible without relying on artifact retention.
+      # Uncomment the block below and change `permissions: contents: read`
+      # to `permissions: contents: write` at the top of the job when ready.
+      #
+      # - name: Create GitHub Release with results
+      #   uses: softprops/action-gh-release@v2
+      #   with:
+      #     tag_name: bench-1m-${{ github.run_id }}
+      #     name: "1M MS-MARCO benchmark run ${{ github.run_id }}"
+      #     body: |
+      #       Automated 1M MS-MARCO benchmark triggered manually via workflow_dispatch.
+      #     files: |
+      #       results/1m/**
+      #       assets/1m/**

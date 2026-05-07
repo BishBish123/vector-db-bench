@@ -293,6 +293,93 @@ def plot_speedup_vs_baseline(
     return paths
 
 
+def plot_sweep_pareto(
+    sweep_parquet: str | Path,
+    out: str | Path,
+) -> tuple[Path, Path]:
+    """Recall@k (x) vs p95 latency (y) scatter for a knob-grid sweep result.
+
+    Non-dominated (Pareto-frontier) points are highlighted with a filled
+    marker and connected by a solid line; dominated points use an open
+    marker. The chart reads the parquet written by
+    :func:`vdbbench.sweep.write_sweep_parquet` and groups by adapter name.
+
+    Both PNG and SVG are written using the same style as other vdbbench
+    charts (``_save_both``).
+    """
+    from vdbbench.sweep import SweepResult, pareto_frontier  # noqa: PLC0415
+
+    out_path = _ensure_outdir(out)
+    df = pd.read_parquet(sweep_parquet)
+    if df.empty:
+        raise ValueError(f"sweep parquet at {sweep_parquet} is empty")
+
+    fig, ax = plt.subplots(figsize=(8, 6))
+
+    for adapter in sorted(df["adapter"].unique()):
+        sub = df[df["adapter"] == adapter]
+        # Reconstruct SweepResult objects for pareto_frontier().
+        results = [
+            SweepResult(
+                adapter=str(row["adapter"]),
+                params={},  # not needed for frontier calculation
+                recall_at_k=float(row["recall_at_k"]),
+                qps=float(row["qps"]),
+                p50_ms=float(row["p50_ms"]),
+                p95_ms=float(row["p95_ms"]),
+                p99_ms=float(row["p99_ms"]),
+                ingest_seconds=float(row["ingest_seconds"]),
+                params_json=str(row.get("params_json", "{}")),
+            )
+            for _, row in sub.iterrows()
+        ]
+        frontier = pareto_frontier(results)
+        frontier_p95 = {r.p95_ms for r in frontier}
+        frontier_recall = {r.recall_at_k for r in frontier}
+
+        color = _DB_COLORS.get(adapter, "#444444")
+
+        # Dominated points — open markers.
+        dom_sub = sub[
+            ~(
+                sub["recall_at_k"].isin(frontier_recall)
+                & sub["p95_ms"].isin(frontier_p95)
+            )
+        ]
+        if not dom_sub.empty:
+            ax.scatter(
+                dom_sub["recall_at_k"],
+                dom_sub["p95_ms"],
+                color=color,
+                marker="o",
+                facecolors="none",
+                s=50,
+                alpha=0.6,
+                label=f"{adapter} (dominated)",
+            )
+
+        # Pareto-frontier points — filled markers + connecting line.
+        if frontier:
+            f_recall = [r.recall_at_k for r in frontier]
+            f_p95 = [r.p95_ms for r in frontier]
+            ax.scatter(
+                f_recall, f_p95, color=color, marker="o", s=80, zorder=3,
+                label=f"{adapter} (Pareto)"
+            )
+            ax.plot(f_recall, f_p95, color=color, linewidth=1.5)
+
+    ax.set_xlabel("Recall@k (mean)")
+    ax.set_ylabel("p95 latency (ms)")
+    ax.set_yscale("log")
+    ax.grid(True, which="both", linestyle="--", alpha=0.4)
+    ax.set_title("Knob-grid Pareto sweep — recall vs p95 latency")
+    ax.legend(fontsize=8)
+    fig.tight_layout()
+    paths = _save_both(fig, out_path, "sweep_pareto")
+    plt.close(fig)
+    return paths
+
+
 def plot_all(
     summary_path: str | Path,
     out: str | Path,

@@ -1,0 +1,13 @@
+{
+  "bundle_fingerprint": "60c9b8e541ae4b6de7a0a5d43b10e26a",
+  "dim": 32,
+  "encoded_at_fingerprint": "60c9b8e541ae4b6de7a0a5d43b10e26a",
+  "encoder_name": "fake-test-encoder",
+  "metadata": {
+    "batch_size": 64,
+    "encoder_dim": 32
+  },
+  "n_passages": 8,
+  "n_queries": 1,
+  "schema_version": 1
+}

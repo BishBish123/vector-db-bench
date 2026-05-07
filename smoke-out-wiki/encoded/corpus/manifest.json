@@ -1,0 +1,12 @@
+{
+  "fingerprint": "60c9b8e541ae4b6de7a0a5d43b10e26a",
+  "metadata": {
+    "dataset": "wikipedia",
+    "n_chunks": 8
+  },
+  "n_passages": 8,
+  "n_qrels": 1,
+  "n_queries": 1,
+  "name": "wikipedia@n=5",
+  "schema_version": 1
+}
