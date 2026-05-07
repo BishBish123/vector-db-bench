@@ -93,9 +93,18 @@ class PgVectorAdapter:
         # TCP+auth handshake cost.
         from pgvector.psycopg import register_vector  # noqa: PLC0415
 
+        # Hold the freshly opened connection in a local until *all*
+        # initialisation succeeds — only then "promote" it onto self._conn.
+        # Until promotion, any failure path explicitly closes the local so
+        # we never leak a TCP connection to the pgvector container. This
+        # specifically covers register_vector() raising (e.g. when the
+        # `vector` extension isn't installed yet) — earlier revisions
+        # opened the connection, called register_vector, and only set up
+        # exception handling for the DDL block, leaking on the
+        # register_vector path.
         conn = self._open_connection()
-        register_vector(conn)
         try:
+            register_vector(conn)
             with conn.cursor() as cur:
                 cur.execute("CREATE EXTENSION IF NOT EXISTS vector")
                 cur.execute(f'DROP TABLE IF EXISTS "{self._table}"')
@@ -104,8 +113,11 @@ class PgVectorAdapter:
                 )
                 conn.commit()
         except Exception:
-            # If DDL fails, don't leave a half-initialized adapter behind.
-            self._close_connection()
+            # Anything during register_vector or DDL means the adapter is
+            # not initialised — close the local connection (self._conn is
+            # still None at this point) and propagate.
+            with contextlib.suppress(Exception):
+                conn.close()
             raise
         self._conn = conn
         self._dim = dim

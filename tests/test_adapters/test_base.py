@@ -88,3 +88,54 @@ class TestOptionalAdapterUnavailable:
         adapter = ChromaAdapter(path="/tmp/nope-chroma")
         with pytest.raises(OptionalAdapterUnavailableError, match="Chroma"):
             adapter.setup(dim=4, params={})
+
+
+class TestPgVectorSetupConnectionLifecycle:
+    """`setup()` must not leak the freshly opened psycopg connection if any
+    initialisation step (register_vector, DDL) raises. Earlier the
+    register_vector call sat outside the try/except so a failure there
+    skipped the close path entirely.
+    """
+
+    def test_setup_closes_connection_on_register_vector_failure(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        pytest.importorskip("pgvector")
+        from vdbbench.adapters.pgvector import PgVectorAdapter  # noqa: PLC0415
+
+        adapter = PgVectorAdapter(dsn="postgresql://example/none-of-this-is-real")
+
+        # Track the synthetic connection so we can assert it was closed
+        # exactly once and never promoted onto self._conn.
+        class _FakeConn:
+            def __init__(self) -> None:
+                self.closed = 0
+
+            def close(self) -> None:
+                self.closed += 1
+
+            def cursor(self) -> object:  # pragma: no cover - never reached
+                raise AssertionError("cursor() should not run after register_vector raises")
+
+        fake = _FakeConn()
+        monkeypatch.setattr(PgVectorAdapter, "_open_connection", lambda self: fake)
+
+        # Inject a register_vector that raises so setup() takes the
+        # cleanup path. The adapter imports it lazily inside setup() so we
+        # patch the module attribute the same way pgvector exposes it.
+        import pgvector.psycopg as pgv_psycopg  # noqa: PLC0415
+
+        def boom(_conn: object) -> None:
+            raise RuntimeError("register_vector failure")
+
+        monkeypatch.setattr(pgv_psycopg, "register_vector", boom)
+
+        with pytest.raises(RuntimeError, match="register_vector failure"):
+            adapter.setup(dim=4, params={})
+
+        # Connection got closed and was never promoted.
+        assert fake.closed == 1
+        assert adapter._conn is None
+        # And the adapter is still un-initialised so a follow-up ingest
+        # call raises the un-setup error rather than a phantom-state one.
+        assert adapter._dim is None
