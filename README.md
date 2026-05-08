@@ -61,7 +61,7 @@ uv run vdbbench bench  --encoded data/encoded-demo --out results/demo \
 uv run vdbbench plot   --summary results/demo/summary.parquet --out assets
 ```
 
-`results/demo/summary.parquet` is checked into the repo so a reviewer can run only step 4 (the plot) and inspect the published numbers without bringing services up. `bench_manifest.json` next to it captures encoder identity, adapter versions, and host metadata for the run that produced those numbers.
+`results/demo/summary.parquet`, the matching `timings.parquet`, and the `bench_manifest.json` from the run that produced them are checked into the repo — a reviewer can run only step 4 (the plot) and inspect the published numbers without bringing services up. The manifest captures encoder identity, adapter versions, encoded-bundle fingerprint, and host metadata so the parquet is auditable, not just present.
 
 ### Full (1 M MS-MARCO, the canonical benchmark)
 
@@ -73,7 +73,7 @@ uv run vdbbench bench --encoded data/encoded-1m --out results/full --all --profi
 uv run vdbbench plot  --summary results/full/summary.parquet --out assets/full
 ```
 
-`make bench-1m` (planned) is the one-command wrapper. Expect ~6–12 hours wall-clock on a laptop depending on which adapters land — the Pareto sweep over `ef_search` / `probes` / `nprobes` is what eats the time. Persist the resulting `results/full/` tree (parquet + `bench_manifest.json`) when you publish numbers.
+`make bench-1m` is the one-command wrapper (defined in the Makefile; `prep --dataset msmarco --sample-size 1000000`, then `bench --all --profile p99`, then `plot`). Expect ~6–12 hours wall-clock on a laptop depending on which adapters land — the Pareto sweep over `ef_search` / `probes` / `nprobes` is what eats the time. Persist the resulting `results/full/` tree (parquet + `bench_manifest.json`) when you publish numbers.
 
 The `--lancedb-path` and `--chroma-path` flags (used by `--all`) are skipped on Intel macOS (no wheels for `lancedb` / `chromadb`+`onnxruntime`); use the Docker bench image or run on Linux / arm64 macOS for the full four-way comparison.
 

@@ -1,0 +1,49 @@
+{
+  "adapter_versions": {
+    "pgvector": "pgvector==0.4.2",
+    "qdrant": "qdrant-client==1.17.1"
+  },
+  "bench_completed_at": "2026-05-01T16:51:58.087848+00:00",
+  "bench_specs": [
+    {
+      "adapter": "pgvector",
+      "k": 10,
+      "label": "pgvector:hnsw-default",
+      "params": {
+        "index": "hnsw",
+        "metric": "cosine"
+      },
+      "params_hash": "3db35d3d9a027cdd",
+      "profile": "warm",
+      "repeats": 1,
+      "warmup_queries": 10
+    },
+    {
+      "adapter": "qdrant",
+      "k": 10,
+      "label": "qdrant:hnsw-default",
+      "params": {
+        "metric": "cosine"
+      },
+      "params_hash": "e44dff8986f66cb8",
+      "profile": "warm",
+      "repeats": 1,
+      "warmup_queries": 10
+    }
+  ],
+  "bench_started_at": "2026-05-01T16:51:47.311553+00:00",
+  "encoded_bundle_fingerprint": "a12f2d42f20b0142bde655ccaf801565",
+  "encoder_dim": 64,
+  "encoder_name": "synthetic-gaussian",
+  "host_metadata": {
+    "cpu_count": 8,
+    "machine": "x86_64",
+    "platform": "macOS-15.7.4-x86_64-i386-64bit",
+    "processor": "i386",
+    "python_implementation": "CPython",
+    "python_version": "3.12.13",
+    "total_memory_bytes": 8589934592
+  },
+  "schema_version": 1,
+  "vdbbench_version": "0.1.0"
+}
