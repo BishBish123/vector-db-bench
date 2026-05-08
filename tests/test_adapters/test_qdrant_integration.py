@@ -1,7 +1,12 @@
 """Integration tests for the Qdrant adapter.
 
 Requires a running Qdrant container at QDRANT_URL (default
-http://localhost:6333). Bring it up with:
+http://localhost:6333). Reachability is probed via the shared
+`qdrant_url` fixture in `conftest.py`, so a container that dies mid-job
+produces a clean skip rather than a hard fail with a stack trace deep
+inside qdrant_client.
+
+Bring it up with:
 
     docker run -d --name vdbbench-qdrant-dev -p 6333:6333 -p 6334:6334 \
         qdrant/qdrant:v1.13.0
@@ -10,7 +15,6 @@ http://localhost:6333). Bring it up with:
 from __future__ import annotations
 
 import contextlib
-import os
 import uuid
 from collections.abc import Iterator
 
@@ -20,12 +24,6 @@ import pytest
 from vdbbench.adapters.qdrant import QdrantAdapter
 
 pytestmark = pytest.mark.integration
-
-DEFAULT_URL = "http://localhost:6333"
-
-
-def _url() -> str:
-    return os.environ.get("QDRANT_URL", DEFAULT_URL)
 
 
 def _random_vectors(n: int, dim: int, seed: int = 0) -> np.ndarray:
@@ -37,9 +35,15 @@ def _random_vectors(n: int, dim: int, seed: int = 0) -> np.ndarray:
 
 
 @pytest.fixture
-def adapter() -> Iterator[QdrantAdapter]:
+def adapter(qdrant_url: str) -> Iterator[QdrantAdapter]:
+    """Fresh adapter against an isolated collection per test.
+
+    `qdrant_url` is the shared reachability-probed fixture from
+    `conftest.py`; if the container is down, this entire test class
+    skips before any adapter call runs.
+    """
     collection = f"vdbbench_test_{uuid.uuid4().hex[:8]}"
-    a = QdrantAdapter(url=_url(), collection=collection)
+    a = QdrantAdapter(url=qdrant_url, collection=collection)
     yield a
     with contextlib.suppress(Exception):
         a.teardown()

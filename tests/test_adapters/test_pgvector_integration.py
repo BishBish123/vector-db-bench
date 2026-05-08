@@ -2,7 +2,10 @@
 
 Requires a running pgvector container at PGVECTOR_DSN (default
 postgresql://bench:bench@localhost:5433/bench). Marked `integration` so
-they are skipped on developer machines without Docker.
+they are skipped on developer machines without Docker. Reachability is
+probed via the shared `pgvector_dsn` fixture in `conftest.py`, so a
+container that dies mid-job produces a clean skip rather than a hard
+fail with a stack trace deep inside psycopg.
 
 Bring the container up with:
 
@@ -14,7 +17,6 @@ Bring the container up with:
 from __future__ import annotations
 
 import contextlib
-import os
 import uuid
 from collections.abc import Iterator
 
@@ -24,12 +26,6 @@ import pytest
 from vdbbench.adapters.pgvector import PgVectorAdapter
 
 pytestmark = pytest.mark.integration
-
-DEFAULT_DSN = "postgresql://bench:bench@localhost:5433/bench"
-
-
-def _dsn() -> str:
-    return os.environ.get("PGVECTOR_DSN", DEFAULT_DSN)
 
 
 def _random_vectors(n: int, dim: int, seed: int = 0) -> np.ndarray:
@@ -41,10 +37,15 @@ def _random_vectors(n: int, dim: int, seed: int = 0) -> np.ndarray:
 
 
 @pytest.fixture
-def adapter() -> Iterator[PgVectorAdapter]:
-    """Fresh adapter against an isolated table per test."""
+def adapter(pgvector_dsn: str) -> Iterator[PgVectorAdapter]:
+    """Fresh adapter against an isolated table per test.
+
+    `pgvector_dsn` is the shared reachability-probed fixture from
+    `conftest.py`; if the container is down, this entire test class
+    skips before any adapter call runs.
+    """
     table = f"vdbbench_test_{uuid.uuid4().hex[:8]}"
-    a = PgVectorAdapter(dsn=_dsn(), table=table)
+    a = PgVectorAdapter(dsn=pgvector_dsn, table=table)
     yield a
     with contextlib.suppress(Exception):
         a.teardown()
