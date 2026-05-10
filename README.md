@@ -14,7 +14,7 @@
 Most vector-DB comparisons online are vendor blog posts or synthetic micro-benchmarks. This repo is built so a reviewer can:
 
 1. Read the methodology and find no holes
-2. Run `make bench-all` on a laptop and reproduce the **demo** numbers (and `make bench-1m` for the full sweep)
+2. Run `make bench-demo` on a laptop and reproduce the **demo** numbers (and `make bench-100k` / `make bench-1m` for larger sweeps)
 3. Re-run the analysis themselves from the published parquet
 
 That's the bar.
@@ -58,12 +58,17 @@ make install
 make up
 
 # 3. Demo run — 5 000 synthetic vectors, ~30 seconds end-to-end.
+#    `make bench-demo` is the one-command wrapper for exactly the steps below.
+make bench-demo
+# ...or run them by hand:
 uv run vdbbench prep   --out data/encoded-demo --dataset synthetic --sample-size 5000 --dim 64
 uv run vdbbench bench  --encoded data/encoded-demo --out results/demo \
                        --pgvector-dsn postgresql://bench:bench@localhost:5433/bench \
                        --qdrant-url http://localhost:6333
 uv run vdbbench plot   --summary results/demo/summary.parquet --out assets
 ```
+
+For a larger sweep on the same laptop, `make bench-100k` runs the same pipeline at 100 000 vectors (configurable via `SAMPLE_SIZE`) and writes to `results/100k/`. `make bench-1m` is the canonical full sweep below.
 
 `results/demo/summary.parquet`, the matching `timings.parquet`, and the `bench_manifest.json` from the run that produced them are checked into the repo — a reviewer can run only step 4 (the plot) and inspect the published numbers without bringing services up. The manifest captures encoder identity, adapter versions, encoded-bundle fingerprint, and host metadata so the parquet is auditable, not just present.
 

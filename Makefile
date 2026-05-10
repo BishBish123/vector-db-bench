@@ -82,11 +82,17 @@ prep: ## Build corpus + ground-truth (deterministic)
 	$(UV) run vdbbench prep --sample-size $(SAMPLE_SIZE) --embed-model $(EMBED_MODEL)
 
 .PHONY: bench
-bench: ## Run benchmark across all DBs (pgvector + qdrant via Docker; lancedb/chroma if installed)
-	$(UV) run vdbbench bench --all
+bench: ## Run benchmark across all DBs at SAMPLE_SIZE (default 100k) — writes results/100k/
+	$(UV) run vdbbench bench --all --out results/100k
 
-.PHONY: bench-all
-bench-all: prep bench plots ## Demo pipeline: prep + bench + plots (5K-scale by default)
+.PHONY: bench-demo
+bench-demo: ## Demo pipeline reproducing the README numbers: synthetic 5k vectors @ dim=64, writes results/demo/
+	$(UV) run vdbbench prep  --out data/encoded-demo --dataset synthetic --sample-size 5000 --dim 64
+	$(UV) run vdbbench bench --encoded data/encoded-demo --out results/demo --all
+	$(UV) run vdbbench plot  --summary results/demo/summary.parquet --out assets
+
+.PHONY: bench-100k
+bench-100k: prep bench plots ## 100k-scale sweep (uses SAMPLE_SIZE/EMBED_MODEL); writes results/100k/
 
 .PHONY: bench-1m
 bench-1m: ## Full 1M MS-MARCO sweep (results/full/summary.parquet; ~hours, no commit)
@@ -95,8 +101,8 @@ bench-1m: ## Full 1M MS-MARCO sweep (results/full/summary.parquet; ~hours, no co
 	$(UV) run vdbbench plot  --summary results/full/summary.parquet --out assets/full
 
 .PHONY: plots
-plots: ## Regenerate analysis plots from results/raw.parquet
-	$(UV) run vdbbench plot
+plots: ## Regenerate analysis plots from results/100k/summary.parquet
+	$(UV) run vdbbench plot --summary results/100k/summary.parquet --out assets/100k
 
 # ---------------------------------------------------------------------------
 # Containers
