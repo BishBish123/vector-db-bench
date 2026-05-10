@@ -53,6 +53,47 @@ from vdbbench.metrics.retrieval import (
 # Bumped any time the manifest schema changes in a way readers care about.
 BENCH_MANIFEST_SCHEMA_VERSION: int = 1
 
+
+class IncompatibleBenchManifestError(ValueError):
+    """Raised by :func:`load_bench_manifest` when a manifest's schema_version
+    doesn't match :data:`BENCH_MANIFEST_SCHEMA_VERSION`.
+
+    The compatibility contract is one-way today (no backwards-compat
+    shims yet), so a mismatch means the reader and writer disagree on
+    layout and continuing would silently corrupt downstream analysis.
+    The exception carries both versions so a caller can decide whether
+    to upgrade vdbbench or pin to the producer's release.
+    """
+
+    def __init__(self, found: object, expected: int) -> None:
+        super().__init__(
+            f"bench_manifest.json schema_version {found!r} is not compatible "
+            f"with this vdbbench (expected {expected})"
+        )
+        self.found = found
+        self.expected = expected
+
+
+def load_bench_manifest(path: str | Path) -> dict[str, object]:
+    """Read a `bench_manifest.json` and validate its schema_version.
+
+    Pairs with the writer in :class:`BenchResult.save`. The manifest's
+    ``schema_version`` field has to be present and equal to
+    :data:`BENCH_MANIFEST_SCHEMA_VERSION`; otherwise we raise
+    :class:`IncompatibleBenchManifestError` so the contract isn't
+    write-only.
+    """
+    raw = Path(path).read_text()
+    payload = json.loads(raw)
+    if not isinstance(payload, dict):
+        raise IncompatibleBenchManifestError(type(payload).__name__, BENCH_MANIFEST_SCHEMA_VERSION)
+    if "schema_version" not in payload:
+        raise IncompatibleBenchManifestError(None, BENCH_MANIFEST_SCHEMA_VERSION)
+    found = payload["schema_version"]
+    if found != BENCH_MANIFEST_SCHEMA_VERSION:
+        raise IncompatibleBenchManifestError(found, BENCH_MANIFEST_SCHEMA_VERSION)
+    return payload
+
 _PROFILE_DEFAULTS: dict[str, dict[str, int]] = {
     # name -> default warmup_queries and repeats. Profile only nudges the
     # defaults if the caller leaves them unset (sentinel value -1); explicit
