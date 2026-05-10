@@ -51,6 +51,10 @@ cd vector-db-bench
 make install
 
 # 2. Bring up pgvector + qdrant in Docker.
+#    `make up` pulls images first, then waits for the containers to report healthy.
+#    If host port 5433 / 6333 is already allocated, override via env:
+#      make up PGVECTOR_PORT=5444 QDRANT_PORT=6343
+#    The same vars are honoured by docker-compose.yml directly.
 make up
 
 # 3. Demo run — 5 000 synthetic vectors, ~30 seconds end-to-end.

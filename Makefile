@@ -6,6 +6,14 @@ UV ?= uv
 SAMPLE_SIZE ?= 100000
 EMBED_MODEL ?= BAAI/bge-small-en-v1.5
 
+# Container ports — overridable so collisions with an existing local
+# Postgres / Qdrant don't force the user to edit docker-compose.yml.
+# `make up PGVECTOR_PORT=5444 QDRANT_PORT=6343` is the documented escape hatch.
+PGVECTOR_PORT ?= 5433
+QDRANT_PORT ?= 6333
+export PGVECTOR_PORT
+export QDRANT_PORT
+
 # ---------------------------------------------------------------------------
 # Help
 # ---------------------------------------------------------------------------
@@ -93,9 +101,23 @@ plots: ## Regenerate analysis plots from results/raw.parquet
 # ---------------------------------------------------------------------------
 # Containers
 # ---------------------------------------------------------------------------
+.PHONY: up-pull
+up-pull: ## Pre-pull pgvector + qdrant images so `up --wait` doesn't time out on first run
+	docker compose pull
+
+.PHONY: up-wait
+up-wait: ## Start containers and wait for healthy (assumes images already pulled)
+	@docker compose up -d --wait || { \
+		echo ""; \
+		echo "[make up] docker compose failed."; \
+		echo "  If a host port is already allocated, override the published port:"; \
+		echo "    make up PGVECTOR_PORT=5444 QDRANT_PORT=6343"; \
+		echo "  Current published ports: pgvector=$(PGVECTOR_PORT), qdrant=$(QDRANT_PORT)."; \
+		exit 1; \
+	}
+
 .PHONY: up
-up: ## Bring up pgvector + qdrant containers (and wait for healthy)
-	docker compose up -d --wait
+up: up-pull up-wait ## Bring up pgvector + qdrant containers (pulls images first, then waits for healthy)
 
 .PHONY: down
 down: ## Tear down containers and remove their volumes

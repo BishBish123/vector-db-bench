@@ -18,7 +18,10 @@ services:
       POSTGRES_PASSWORD: bench
       POSTGRES_DB: bench
     ports:
-      - "5433:5432"
+      # Host port is overridable: `PGVECTOR_PORT=5444 docker compose up`
+      # (or `make up PGVECTOR_PORT=5444`). Default 5433 keeps the bench DSN
+      # baked into the CLI defaults working on a stock host.
+      - "${PGVECTOR_PORT:-5433}:5432"
     volumes:
       - pgvector_data:/var/lib/postgresql/data
     healthcheck:
@@ -45,8 +48,11 @@ services:
     image: qdrant/qdrant:v1.17.0
     container_name: vdbbench-qdrant
     ports:
-      - "6333:6333"
-      - "6334:6334"
+      # Host port is overridable via `QDRANT_PORT` (defaults to 6333). The
+      # gRPC port (6334) shifts in lockstep so a `QDRANT_PORT=6343` run
+      # publishes 6343/6344 cleanly and the bench DSN stays consistent.
+      - "${QDRANT_PORT:-6333}:6333"
+      - "${QDRANT_GRPC_PORT:-6334}:6334"
     volumes:
       - qdrant_data:/qdrant/storage
     healthcheck:
