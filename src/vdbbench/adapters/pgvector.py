@@ -45,6 +45,20 @@ _DISTANCE_OPS: dict[str, tuple[str, str]] = {
 }
 
 
+# Postgres identifier rule we accept: ASCII letters/digits/underscore,
+# starts with a letter or underscore. Looser than the actual Postgres
+# spec (which allows quoted Unicode), but stops the obvious SQL-injection
+# vector from a caller who builds a `table_name` from untrusted input.
+_PG_IDENT_RE = __import__("re").compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def _validate_pg_identifier(name: str) -> None:
+    if not isinstance(name, str) or not _PG_IDENT_RE.match(name):
+        raise ValueError(
+            f"invalid pg identifier {name!r}; expected ^[A-Za-z_][A-Za-z0-9_]*$"
+        )
+
+
 class PgVectorAdapter:
     """A `VectorStoreAdapter` backed by Postgres + pgvector."""
 
@@ -53,6 +67,9 @@ class PgVectorAdapter:
     def __init__(self, dsn: str, table: str = "vdbbench_vectors") -> None:
         self._dsn = dsn
         self._table = table
+        # Validate the constructor-time name with the same rule as
+        # `set_table_name` so the two paths can't disagree.
+        _validate_pg_identifier(table)
         self._dim: int | None = None
         self._params: dict[str, object] = {}
         self._operator: str = "<=>"
@@ -67,6 +84,18 @@ class PgVectorAdapter:
         self._connection_opens: int = 0
 
     # ---------- lifecycle ----------
+
+    def set_table_name(self, name: str) -> None:
+        """Override the per-run table name before ``setup()``.
+
+        The bench runner calls this with a per-spec, uuid-suffixed name
+        so two ``run_bench`` calls against the same Postgres can't share
+        a table and silently corrupt each other's results. Validated
+        with the same identifier rule the constructor uses; safe to
+        call before setup, undefined after.
+        """
+        _validate_pg_identifier(name)
+        self._table = name
 
     def setup(self, dim: int, params: dict[str, object]) -> None:
         if dim <= 0:

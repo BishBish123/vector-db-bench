@@ -28,6 +28,7 @@ import json
 import platform
 import sys
 import time
+import uuid
 from dataclasses import asdict, dataclass, field
 from importlib import metadata as _import_metadata
 from pathlib import Path
@@ -107,6 +108,16 @@ _PROFILE_DEFAULTS: dict[str, dict[str, int]] = {
 _UNSET_INT = -1
 
 
+def _generate_table_name(prefix: str = "vdbbench_vectors") -> str:
+    """Return ``vdbbench_vectors_<8hex>`` for one bench-run's isolation.
+
+    Eight hex chars is plenty (~4B namespace) for the "two parallel
+    runs against the same Postgres" race the per-run table fixes;
+    keeping it short keeps log output readable.
+    """
+    return f"{prefix}_{uuid.uuid4().hex[:8]}"
+
+
 @dataclass(frozen=True)
 class BenchSpec:
     """One adapter + its tuning knobs + how many query repeats to time.
@@ -127,6 +138,12 @@ class BenchSpec:
     repeats: int = _UNSET_INT
     label: str | None = None  # human-readable; defaults to adapter.name + params hash
     profile: str = "warm"
+    # Per-run table / collection name. ``None`` => the runner generates a
+    # uuid-suffixed name (``vdbbench_vectors_<8hex>``) so two concurrent
+    # ``run_bench`` calls against the same Postgres can't share a table
+    # and silently corrupt each other's results. Pass an explicit string
+    # to pin the name (e.g. for repro of an earlier run).
+    table_name: str | None = None
 
     def __post_init__(self) -> None:
         if self.k <= 0:
@@ -394,6 +411,15 @@ def _run_one_spec(
     # "the whole bench process".
     baseline_rss = _sample_rss_bytes(force_gc=True)
     peak_tracker = _PeakRssTracker(baseline=baseline_rss)
+    # Per-run table name: BenchSpec.table_name pins it; None => generate
+    # a uuid-suffixed name so two concurrent run_bench() calls against
+    # the same Postgres can't collide on `vdbbench_vectors`. Adapters
+    # that don't expose `set_table_name` (qdrant/lancedb/chroma manage
+    # their own collection isolation already) silently skip the call.
+    table_name = spec.table_name or _generate_table_name()
+    setter = getattr(spec.adapter, "set_table_name", None)
+    if callable(setter):
+        setter(table_name)
     spec.adapter.setup(encoded.dim, spec.params)
     peak_tracker.observe()  # post-setup
     try:

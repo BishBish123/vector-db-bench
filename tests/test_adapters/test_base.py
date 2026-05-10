@@ -139,3 +139,33 @@ class TestPgVectorSetupConnectionLifecycle:
         # And the adapter is still un-initialised so a follow-up ingest
         # call raises the un-setup error rather than a phantom-state one.
         assert adapter._dim is None
+
+
+class TestPgVectorTableNameValidation:
+    """``set_table_name`` is called by the bench runner with a per-run
+    uuid-suffixed name; validate the rule rejects obvious injection."""
+
+    def test_constructor_rejects_invalid_table(self) -> None:
+        pytest.importorskip("pgvector")
+        from vdbbench.adapters.pgvector import PgVectorAdapter  # noqa: PLC0415
+
+        with pytest.raises(ValueError, match="invalid pg identifier"):
+            PgVectorAdapter(dsn="postgresql://example/none", table='evil"; DROP TABLE x; --')
+
+    def test_set_table_name_rejects_invalid(self) -> None:
+        pytest.importorskip("pgvector")
+        from vdbbench.adapters.pgvector import PgVectorAdapter  # noqa: PLC0415
+
+        adapter = PgVectorAdapter(dsn="postgresql://example/none")
+        with pytest.raises(ValueError, match="invalid pg identifier"):
+            adapter.set_table_name("a b")  # space disallowed
+        with pytest.raises(ValueError, match="invalid pg identifier"):
+            adapter.set_table_name("1table")  # leading digit disallowed
+
+    def test_set_table_name_accepts_uuid_suffixed_name(self) -> None:
+        pytest.importorskip("pgvector")
+        from vdbbench.adapters.pgvector import PgVectorAdapter  # noqa: PLC0415
+
+        adapter = PgVectorAdapter(dsn="postgresql://example/none")
+        adapter.set_table_name("vdbbench_vectors_deadbeef")
+        assert adapter._table == "vdbbench_vectors_deadbeef"

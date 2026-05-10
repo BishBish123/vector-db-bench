@@ -273,6 +273,76 @@ class TestRunBench:
         result = run_bench(encoded, [BenchSpec(adapter=_MemAdapter(), k=2)])
         assert result.manifest["schema_version"] == 1
 
+    def test_concurrent_bench_runs_dont_collide(self) -> None:
+        """Two ``run_bench`` calls in parallel must each get their own
+        per-run table name so they can't share a Postgres table and
+        silently corrupt each other's results.
+
+        Uses a fake adapter that records the table name it was handed
+        through ``set_table_name`` (the same hook the pgvector adapter
+        implements). Threads keep the test fast and avoid the
+        multiprocessing-fork pitfalls on macOS.
+        """
+        import threading  # noqa: PLC0415
+
+        encoded = _toy_encoded()
+
+        class _TableTrackingAdapter(_MemAdapter):
+            name = "tracker"
+
+            def __init__(self) -> None:
+                super().__init__()
+                self.table_name: str | None = None
+
+            def set_table_name(self, name: str) -> None:
+                self.table_name = name
+
+        adapter_a = _TableTrackingAdapter()
+        adapter_b = _TableTrackingAdapter()
+        spec_a = BenchSpec(adapter=adapter_a, params={"variant": "a"}, k=2)
+        spec_b = BenchSpec(adapter=adapter_b, params={"variant": "b"}, k=2)
+
+        results: dict[str, object] = {}
+
+        def _go(key: str, spec: BenchSpec) -> None:
+            results[key] = run_bench(encoded, [spec])
+
+        t_a = threading.Thread(target=_go, args=("a", spec_a))
+        t_b = threading.Thread(target=_go, args=("b", spec_b))
+        t_a.start()
+        t_b.start()
+        t_a.join()
+        t_b.join()
+
+        # Both runs succeeded.
+        assert "a" in results and "b" in results
+        # Each adapter saw a per-run table name, and they're different.
+        assert adapter_a.table_name is not None
+        assert adapter_b.table_name is not None
+        assert adapter_a.table_name != adapter_b.table_name
+        assert adapter_a.table_name.startswith("vdbbench_vectors_")
+        assert adapter_b.table_name.startswith("vdbbench_vectors_")
+
+    def test_table_name_override_pins_the_table(self) -> None:
+        """``BenchSpec(table_name="my_run")`` pins the name verbatim — the
+        runner doesn't generate a uuid suffix."""
+        encoded = _toy_encoded()
+
+        class _TableTrackingAdapter(_MemAdapter):
+            name = "tracker"
+
+            def __init__(self) -> None:
+                super().__init__()
+                self.table_name: str | None = None
+
+            def set_table_name(self, name: str) -> None:
+                self.table_name = name
+
+        adapter = _TableTrackingAdapter()
+        spec = BenchSpec(adapter=adapter, table_name="my_run", k=2)
+        run_bench(encoded, [spec])
+        assert adapter.table_name == "my_run"
+
     def test_run_bench_records_memory_columns(self) -> None:
         """Every memory column on RunSummary must be populated by the runner.
 
