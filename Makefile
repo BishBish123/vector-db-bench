@@ -85,6 +85,10 @@ prep: ## Build corpus + ground-truth (deterministic)
 bench: ## Run benchmark across all DBs at SAMPLE_SIZE (default 100k) — writes results/100k/
 	$(UV) run vdbbench bench --all --out results/100k
 
+.PHONY: smoke
+smoke: ## End-to-end offline smoke (no Docker, no model download) — exercises corpus → encode → bench → plot
+	$(UV) run python scripts/smoke_pipeline.py
+
 .PHONY: bench-demo
 bench-demo: ## Demo pipeline reproducing the README numbers: synthetic 5k vectors @ dim=64, writes results/demo/
 	$(UV) run vdbbench prep  --out data/encoded-demo --dataset synthetic --sample-size 5000 --dim 64

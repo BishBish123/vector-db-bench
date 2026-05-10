@@ -50,6 +50,12 @@ cd vector-db-bench
 # 1. Install (uv-managed, all extras the platform supports).
 make install
 
+# 1b. (Optional) End-to-end offline smoke — no Docker, no model download.
+#     Exercises corpus → encode → bench → plot in a few seconds against
+#     the in-package brute-force adapter. Useful as a "did the install
+#     actually work" check before pulling the bench images.
+make smoke
+
 # 2. Bring up pgvector + qdrant in Docker.
 #    `make up` pulls images first, then waits for the containers to report healthy.
 #    If host port 5433 / 6333 is already allocated, override via env:
