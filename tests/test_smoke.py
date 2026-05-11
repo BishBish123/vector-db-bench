@@ -186,6 +186,66 @@ def test_cli_bench_all_fails_when_no_adapter_succeeds(tmp_path: Path) -> None:
     assert "every adapter failed" in result.output
 
 
+def test_cli_plot_swallows_userwarning_into_rich_note(tmp_path: Path) -> None:
+    """When `plot_all` (or its callees) emits a UserWarning — e.g. the
+    speedup baseline fallback — the CLI catches it and re-emits as a
+    Rich-coloured "note:" line, so the user doesn't see a raw Python
+    UserWarning blob in stderr.
+
+    Drives a synthetic summary parquet whose only DB is `mem` so the
+    speedup chart goes through the auto-baseline branch.
+    """
+    import pandas as pd  # noqa: PLC0415
+
+    summary = tmp_path / "summary.parquet"
+    out = tmp_path / "out"
+    pd.DataFrame(
+        {
+            "db": ["mem", "mem"],
+            "label": ["mem:a", "mem:b"],
+            "params_hash": ["a", "b"],
+            "params_json": ["{}", "{}"],
+            "profile": ["warm", "warm"],
+            "n_passages": [10, 10],
+            "n_queries": [2, 2],
+            "dim": [4, 4],
+            "ingest_s": [0.01, 0.01],
+            "ingest_throughput_vps": [1000.0, 1000.0],
+            "index_s": [0.01, 0.01],
+            "index_bytes": [1, 1],
+            "latency_ms_mean": [1.0, 2.0],
+            "latency_ms_p50": [1.0, 2.0],
+            "latency_ms_p95": [1.0, 2.0],
+            "latency_ms_p99": [1.0, 2.0],
+            "recall_at_k_mean": [1.0, 1.0],
+            "recall_at_k_p50": [1.0, 1.0],
+            "ndcg_at_k_mean": [1.0, 1.0],
+            "qps_estimate": [1000.0, 500.0],
+        }
+    ).to_parquet(summary, index=False)
+    # Two `mem` configs — speedup chart needs an explicit baseline_label
+    # to disambiguate; without it, plot_speedup_vs_baseline raises a
+    # ValueError with the available labels listed. Pass one to keep the
+    # plot succeeding so we can observe whatever Rich output the CLI
+    # produces (and confirm no UserWarning leaks into stderr).
+    result = CliRunner().invoke(
+        app,
+        [
+            "plot",
+            "--summary",
+            str(summary),
+            "--out",
+            str(out),
+            "--baseline-label",
+            "mem:a",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    # Combined output must NOT contain a raw `UserWarning:` blob —
+    # that was the old stderr surface the CLI is meant to suppress.
+    assert "UserWarning" not in result.output
+
+
 def test_cli_plot_missing_summary_prints_clean_error(tmp_path: Path) -> None:
     """`vdbbench plot --summary <missing>` exits 2 with a clean message,
     not a Python traceback. The previous behaviour dumped a

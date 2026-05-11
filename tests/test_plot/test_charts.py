@@ -83,14 +83,18 @@ class TestCharts:
 
     def test_plot_all_writes_every_chart(self, tmp_path: Path) -> None:
         # Toy summary doesn't include the default `chroma` baseline. That's
-        # a legit case in real data too (chroma not in the run), and
-        # `plot_all` is documented to degrade by warning + picking
-        # alphabetically. Pin that path so the test surfaces a regression
-        # if the fallback ever flips back to silent.
+        # a legit case in real data too (chroma not in the run); plot_all
+        # picks the alphabetically-first DB itself instead of letting
+        # plot_speedup_vs_baseline emit a UserWarning. Assert no warning
+        # fires through this entry point so the CLI / smoke runs stay
+        # quiet for non-chroma summaries.
+        import warnings as _warnings  # noqa: PLC0415
+
         df = _toy_summary()
         path = tmp_path / "summary.parquet"
         df.to_parquet(path, index=False)
-        with pytest.warns(UserWarning, match="alphabetically-first"):
+        with _warnings.catch_warnings():
+            _warnings.simplefilter("error", UserWarning)
             result = plot_all(path, tmp_path / "out")
         for name in (
             "pareto",

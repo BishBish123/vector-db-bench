@@ -315,7 +315,16 @@ def plot_all(
     summary = pd.read_parquet(summary_path)
     if summary.empty:
         raise ValueError(f"summary at {summary_path} is empty")
-    speedup_baseline: str | None = "chroma" if "chroma" in summary["db"].values else None
+    # `chroma` is the canonical "no tuning" baseline when present.
+    # Otherwise pick the alphabetically-first DB ourselves so
+    # ``plot_speedup_vs_baseline`` doesn't have to fall back via warning
+    # — the warning is the library's "you forgot to choose" signal, not
+    # something we want to surface for runs that legitimately don't
+    # include chroma (e.g. the single-DB smoke pipeline).
+    if "chroma" in summary["db"].values:
+        speedup_baseline: str | None = "chroma"
+    else:
+        speedup_baseline = sorted(set(summary["db"]))[0]
     return {
         "pareto": plot_pareto_frontier(summary, out),
         "recall": plot_axis_bars(

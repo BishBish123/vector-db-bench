@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import warnings
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -463,7 +464,18 @@ def plot(
 def _plot_impl(*, summary: Path, out: Path, baseline_label: str | None) -> None:
     from vdbbench.plot import plot_all  # noqa: PLC0415
 
-    paths = plot_all(summary, out, baseline_label=baseline_label)
+    # Capture UserWarning emitted by `plot_speedup_vs_baseline` (e.g. the
+    # "no baseline_db given; defaulting to alphabetically-first" hint).
+    # The library still emits warnings so programmatic callers can hook
+    # them; the CLI layer turns them into a Rich-coloured advisory line
+    # so the user gets a tidy `[yellow]note[/]: ...` instead of a
+    # Python-style `UserWarning: ...` blob in stderr.
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always", UserWarning)
+        paths = plot_all(summary, out, baseline_label=baseline_label)
+    for w in caught:
+        if issubclass(w.category, UserWarning):
+            console.print(f"[yellow]note[/]: {w.message}")
     for name, (png, svg) in paths.items():
         console.print(f"[green]{name}[/]: {png.name} + {svg.name}")
 
