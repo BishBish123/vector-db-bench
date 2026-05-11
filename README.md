@@ -162,6 +162,7 @@ docs/
     ADR-002-...           recall@k vs NDCG vs MRR
     ADR-003-...           HNSW vs IVFFLAT vs IVF-PQ
     ADR-004-...           why ship a deterministic FakeEncoder
+    ADR-005-...           schema-version every persisted manifest
 ```
 
 See [BLOG.md](BLOG.md) for the writeup of one specific tradeoff this bench surfaced, [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the layered design, and the [docs/adr/](docs/adr/) directory for the design decisions.
