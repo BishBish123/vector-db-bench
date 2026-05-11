@@ -51,7 +51,10 @@ coverage.xml
 data/
 results/raw/
 results/runs/
+results/100k/
 .bench_cache/
+# Smoke pipeline scratch output (`make smoke` / scripts/smoke_pipeline.py).
+smoke-out/
 # Keep results/demo/ in git so README + blog can reference real numbers.
 
 # Secrets

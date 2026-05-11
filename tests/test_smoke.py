@@ -186,6 +186,97 @@ def test_cli_bench_all_fails_when_no_adapter_succeeds(tmp_path: Path) -> None:
     assert "every adapter failed" in result.output
 
 
+def test_cli_bench_adapter_flag_unknown_value_rejected() -> None:
+    """`vdbbench bench --adapter bogus` errors out with the choice list."""
+    result = CliRunner().invoke(
+        app,
+        ["bench", "--encoded", "/nonexistent", "--adapter", "bogus"],
+    )
+    assert result.exit_code != 0
+    assert "unknown adapter" in result.output
+
+
+def test_cli_bench_adapter_exact_runs_offline(tmp_path: Path) -> None:
+    """`--adapter exact` registers the in-process brute-force adapter so
+    a smoke run with no Docker still produces a summary row."""
+    captured: dict[str, object] = {}
+
+    def _fake(
+        _encoded: object,
+        specs: list[Any],
+        *,
+        progress: bool = False,
+        tolerate_failures: bool = False,
+    ) -> BenchResult:
+        del progress, tolerate_failures
+        captured["dbs"] = [s.adapter.name for s in specs]
+        return BenchResult(
+            timings=pd.DataFrame(),
+            summary=pd.DataFrame([{"db": s.adapter.name} for s in specs]),
+            manifest={"schema_version": 1},
+        )
+
+    out = tmp_path / "results"
+    runner = CliRunner()
+    with (
+        patch("vdbbench.embed.load_encoded_bundle", _stub_load_encoded_bundle),
+        patch("vdbbench.bench.run_bench", _fake),
+    ):
+        result = runner.invoke(
+            app,
+            [
+                "bench",
+                "--encoded",
+                str(tmp_path / "encoded"),
+                "--out",
+                str(out),
+                "--adapter",
+                "exact",
+            ],
+        )
+    assert result.exit_code == 0, result.output
+    assert captured["dbs"] == ["exact"]
+
+
+def test_cli_bench_adapter_memory_alias_resolves_to_exact(tmp_path: Path) -> None:
+    """`--adapter memory` is an alias for `exact` — a single adapter is
+    registered, named `exact`, not `memory`."""
+
+    def _fake(
+        _encoded: object,
+        specs: list[Any],
+        *,
+        progress: bool = False,
+        tolerate_failures: bool = False,
+    ) -> BenchResult:
+        del progress, tolerate_failures
+        return BenchResult(
+            timings=pd.DataFrame(),
+            summary=pd.DataFrame([{"db": s.adapter.name} for s in specs]),
+            manifest={"schema_version": 1},
+        )
+
+    out = tmp_path / "results"
+    runner = CliRunner()
+    with (
+        patch("vdbbench.embed.load_encoded_bundle", _stub_load_encoded_bundle),
+        patch("vdbbench.bench.run_bench", _fake),
+    ):
+        result = runner.invoke(
+            app,
+            [
+                "bench",
+                "--encoded",
+                str(tmp_path / "encoded"),
+                "--out",
+                str(out),
+                "--adapter",
+                "memory",
+            ],
+        )
+    assert result.exit_code == 0, result.output
+
+
 def test_cli_bench_single_adapter_still_hard_fails(tmp_path: Path) -> None:
     """Without `--all`, a connection error on the explicitly-named adapter
     must propagate — there's no other adapter to keep going for, and the

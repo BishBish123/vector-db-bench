@@ -3,11 +3,15 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import typer
 from rich.console import Console
 
 from vdbbench import __version__
+
+if TYPE_CHECKING:  # pragma: no cover - import only resolved by type-checker
+    from vdbbench.bench import BenchSpec
 
 app = typer.Typer(
     name="vdbbench",
@@ -16,6 +20,38 @@ app = typer.Typer(
     add_completion=False,
 )
 console = Console()
+
+
+# `--adapter` choices: the four production backends + an in-process
+# brute-force "exact" adapter that's also exposed as "memory" so users
+# can ask for it by either name. Anything outside this set is a typo,
+# not a quiet skip.
+_ADAPTER_CHOICES: frozenset[str] = frozenset(
+    {"pgvector", "qdrant", "lancedb", "chroma", "exact", "memory"}
+)
+
+
+def _resolve_adapter_names(names: list[str] | None) -> set[str]:
+    """Validate ``--adapter`` values and fold the ``memory`` alias.
+
+    Returns a normalised set with ``memory`` rewritten to ``exact`` so
+    the spec-building branches only have to check one name.
+    """
+    if not names:
+        return set()
+    resolved: set[str] = set()
+    for raw in names:
+        name = raw.strip().lower()
+        if name not in _ADAPTER_CHOICES:
+            raise typer.BadParameter(
+                f"unknown adapter {raw!r}; expected one of "
+                f"{sorted(_ADAPTER_CHOICES)}",
+                param_hint="--adapter",
+            )
+        if name == "memory":
+            name = "exact"
+        resolved.add(name)
+    return resolved
 
 
 def _apply_all_defaults(
@@ -112,56 +148,24 @@ def prep(
     console.print(f"[green]wrote[/] encoded bundle to {out}")
 
 
-@app.command()
-def bench(
-    encoded: Path = typer.Option(Path("data/encoded"), help="Encoded bundle directory."),
-    out: Path = typer.Option(Path("results"), help="Where to write timings + summary parquet."),
-    pgvector_dsn: str | None = typer.Option(
-        None, help="If set, run the pgvector adapter against this DSN."
-    ),
-    qdrant_url: str | None = typer.Option(
-        None, help="If set, run the qdrant adapter against this URL."
-    ),
-    lancedb_path: Path | None = typer.Option(
-        None, help="If set, run the lancedb adapter against this directory."
-    ),
-    chroma_path: Path | None = typer.Option(
-        None, help="If set, run the chroma adapter against this directory."
-    ),
-    all_adapters: bool = typer.Option(
-        False,
-        "--all",
-        help=(
-            "Run every adapter the local install supports with sensible defaults: "
-            "pgvector at the standard local DSN, qdrant at the standard local URL, "
-            "and lancedb / chroma at data/lancedb / data/chroma if their wheels are "
-            "importable. Equivalent to passing every --*-dsn / --*-path flag."
-        ),
-    ),
-    k: int = typer.Option(10, help="Top-k for retrieval."),
-    repeats: int = typer.Option(
-        -1,
-        help=(
-            "Number of measured query passes per spec. The default sentinel -1 "
-            "means 'use the profile default' (cold/warm => 1, p99 => 5); pass an "
-            "explicit positive value to override."
-        ),
-    ),
-    profile: str = typer.Option(
-        "warm",
-        help="Bench profile: 'cold' (no warm-up), 'warm' (default), 'p99' (50 warm-up + 5 repeats).",
-    ),
-) -> None:
-    """Run the bench across every adapter the user enabled by passing a DSN/path."""
-    from vdbbench.bench import BenchSpec, run_bench  # noqa: PLC0415
-    from vdbbench.embed import load_encoded_bundle  # noqa: PLC0415
+def _build_bench_specs(
+    *,
+    pgvector_dsn: str | None,
+    qdrant_url: str | None,
+    lancedb_path: Path | None,
+    chroma_path: Path | None,
+    run_exact: bool,
+    k: int,
+    repeats: int,
+    profile: str,
+) -> list[BenchSpec]:
+    """Translate the per-adapter CLI flags into a list of BenchSpec rows.
 
-    if all_adapters:
-        pgvector_dsn, qdrant_url, lancedb_path, chroma_path = _apply_all_defaults(
-            pgvector_dsn, qdrant_url, lancedb_path, chroma_path
-        )
+    Extracted from ``bench()`` so the command body stays under the
+    branch-count lint cap; pure data wiring with no I/O.
+    """
+    from vdbbench.bench import BenchSpec  # noqa: PLC0415
 
-    enc = load_encoded_bundle(encoded)
     specs: list[BenchSpec] = []
     if pgvector_dsn:
         from vdbbench.adapters import PgVectorAdapter  # noqa: PLC0415
@@ -215,11 +219,112 @@ def bench(
                 profile=profile,
             )
         )
+    if run_exact:
+        from vdbbench.adapters import ExactAdapter  # noqa: PLC0415
+
+        specs.append(
+            BenchSpec(
+                adapter=ExactAdapter(),
+                params={"metric": "cosine"},
+                k=k,
+                repeats=repeats,
+                label="exact:bruteforce",
+                profile=profile,
+            )
+        )
+    return specs
+
+
+@app.command()
+def bench(
+    encoded: Path = typer.Option(Path("data/encoded"), help="Encoded bundle directory."),
+    out: Path = typer.Option(Path("results"), help="Where to write timings + summary parquet."),
+    pgvector_dsn: str | None = typer.Option(
+        None, help="If set, run the pgvector adapter against this DSN."
+    ),
+    qdrant_url: str | None = typer.Option(
+        None, help="If set, run the qdrant adapter against this URL."
+    ),
+    lancedb_path: Path | None = typer.Option(
+        None, help="If set, run the lancedb adapter against this directory."
+    ),
+    chroma_path: Path | None = typer.Option(
+        None, help="If set, run the chroma adapter against this directory."
+    ),
+    all_adapters: bool = typer.Option(
+        False,
+        "--all",
+        help=(
+            "Run every adapter the local install supports with sensible defaults: "
+            "pgvector at the standard local DSN, qdrant at the standard local URL, "
+            "and lancedb / chroma at data/lancedb / data/chroma if their wheels are "
+            "importable. Equivalent to passing every --*-dsn / --*-path flag."
+        ),
+    ),
+    adapter: list[str] | None = typer.Option(
+        None,
+        "--adapter",
+        help=(
+            "Pick adapters by name (repeatable). Choices: pgvector, qdrant, "
+            "lancedb, chroma, exact, memory ('memory' is an alias for "
+            "'exact', the in-process brute-force adapter — handy for "
+            "smoke runs without Docker). Service adapters use the same "
+            "defaults as --all (localhost DSN / URL); embedded adapters "
+            "use data/lancedb / data/chroma. Combine with --pgvector-dsn / "
+            "--qdrant-url / --lancedb-path / --chroma-path to override "
+            "individual endpoints."
+        ),
+    ),
+    k: int = typer.Option(10, help="Top-k for retrieval."),
+    repeats: int = typer.Option(
+        -1,
+        help=(
+            "Number of measured query passes per spec. The default sentinel -1 "
+            "means 'use the profile default' (cold/warm => 1, p99 => 5); pass an "
+            "explicit positive value to override."
+        ),
+    ),
+    profile: str = typer.Option(
+        "warm",
+        help="Bench profile: 'cold' (no warm-up), 'warm' (default), 'p99' (50 warm-up + 5 repeats).",
+    ),
+) -> None:
+    """Run the bench across every adapter the user enabled by passing a DSN/path."""
+    from vdbbench.bench import run_bench  # noqa: PLC0415
+    from vdbbench.embed import load_encoded_bundle  # noqa: PLC0415
+
+    selected_adapters = _resolve_adapter_names(adapter)
+    run_exact = "exact" in selected_adapters
+    if all_adapters:
+        pgvector_dsn, qdrant_url, lancedb_path, chroma_path = _apply_all_defaults(
+            pgvector_dsn, qdrant_url, lancedb_path, chroma_path
+        )
+    if "pgvector" in selected_adapters and pgvector_dsn is None:
+        pgvector_dsn = "postgresql://bench:bench@localhost:5433/bench"
+    if "qdrant" in selected_adapters and qdrant_url is None:
+        qdrant_url = "http://localhost:6333"
+    if "lancedb" in selected_adapters and lancedb_path is None:
+        lancedb_path = Path("data/lancedb")
+    if "chroma" in selected_adapters and chroma_path is None:
+        chroma_path = Path("data/chroma")
+
+    enc = load_encoded_bundle(encoded)
+    specs = _build_bench_specs(
+        pgvector_dsn=pgvector_dsn,
+        qdrant_url=qdrant_url,
+        lancedb_path=lancedb_path,
+        chroma_path=chroma_path,
+        run_exact=run_exact,
+        k=k,
+        repeats=repeats,
+        profile=profile,
+    )
 
     if not specs:
         console.print(
             "[yellow]no adapters enabled[/] — pass at least one of "
             "--pgvector-dsn / --qdrant-url / --lancedb-path / --chroma-path, "
+            "--adapter <name> (pgvector|qdrant|lancedb|chroma|exact|memory), "
             "or --all to use sensible defaults"
         )
         raise typer.Exit(code=2)
