@@ -186,6 +186,39 @@ def test_cli_bench_all_fails_when_no_adapter_succeeds(tmp_path: Path) -> None:
     assert "every adapter failed" in result.output
 
 
+def test_cli_plot_missing_summary_prints_clean_error(tmp_path: Path) -> None:
+    """`vdbbench plot --summary <missing>` exits 2 with a clean message,
+    not a Python traceback. The previous behaviour dumped a
+    FileNotFoundError stack which made it look like a bug in the CLI."""
+    missing = tmp_path / "nope.parquet"
+    result = CliRunner().invoke(
+        app, ["plot", "--summary", str(missing), "--out", str(tmp_path / "out")]
+    )
+    assert result.exit_code == 2, result.output
+    assert "error" in result.output.lower()
+    # Specifically: no Python traceback header.
+    assert "Traceback" not in result.output
+
+
+def test_cli_prep_invalid_dataset_prints_clean_error(tmp_path: Path) -> None:
+    """A ValueError from the prep pipeline (e.g. an unknown dataset) is
+    surfaced as a single error line + exit 2, not a stack trace."""
+    result = CliRunner().invoke(
+        app,
+        [
+            "prep",
+            "--out",
+            str(tmp_path / "encoded"),
+            "--dataset",
+            "synthetic",
+            "--sample-size",
+            "0",  # SyntheticConfig rejects non-positive sample_size with ValueError
+        ],
+    )
+    assert result.exit_code == 2, result.output
+    assert "Traceback" not in result.output
+
+
 def test_cli_bench_adapter_flag_unknown_value_rejected() -> None:
     """`vdbbench bench --adapter bogus` errors out with the choice list."""
     result = CliRunner().invoke(

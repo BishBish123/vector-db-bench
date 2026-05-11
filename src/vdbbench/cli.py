@@ -22,6 +22,33 @@ app = typer.Typer(
 console = Console()
 
 
+# Exit code 2 is the standard "user-facing error" code (see bash + the
+# typer/click convention); 1 is reserved for "the bench ran but every
+# adapter failed", 0 is success.
+_USER_ERROR_EXIT = 2
+
+# Exception types we know belong to the "user typo / missing file /
+# wrong value" bucket — for these we print the message verbatim and
+# exit 2 instead of dumping a traceback. Anything outside this tuple
+# is a real bug and should still raise so the stack is preserved.
+_USER_FACING_ERRORS: tuple[type[BaseException], ...] = (
+    FileNotFoundError,
+    ValueError,
+)
+
+
+def _handle_user_error(exc: BaseException) -> None:
+    """Print a clean error line and exit with the standard user-error code.
+
+    Called from each command's outer try/except. ``typer.Exit`` is what
+    the rest of the CLI uses to signal exit codes through Typer's
+    runtime, so reuse it for consistency.
+    """
+    name = type(exc).__name__
+    console.print(f"[red]error[/] ({name}): {exc}")
+    raise typer.Exit(code=_USER_ERROR_EXIT) from exc
+
+
 # `--adapter` choices: the four production backends + an in-process
 # brute-force "exact" adapter that's also exposed as "memory" so users
 # can ask for it by either name. Anything outside this set is a typo,
@@ -113,6 +140,30 @@ def prep(
     n_queries: int = typer.Option(100, help="Number of queries (only used for 'synthetic')."),
 ) -> None:
     """Build corpus + embeddings + ground-truth qrels into a parquet bundle."""
+    try:
+        _prep_impl(
+            out=out,
+            dataset=dataset,
+            sample_size=sample_size,
+            embed_model=embed_model,
+            dim=dim,
+            seed=seed,
+            n_queries=n_queries,
+        )
+    except _USER_FACING_ERRORS as exc:
+        _handle_user_error(exc)
+
+
+def _prep_impl(
+    *,
+    out: Path,
+    dataset: str,
+    sample_size: int,
+    embed_model: str,
+    dim: int,
+    seed: int,
+    n_queries: int,
+) -> None:
     from vdbbench.corpus import (  # noqa: PLC0415
         SyntheticConfig,
         generate_synthetic,
@@ -290,6 +341,38 @@ def bench(
     ),
 ) -> None:
     """Run the bench across every adapter the user enabled by passing a DSN/path."""
+    try:
+        _bench_impl(
+            encoded=encoded,
+            out=out,
+            pgvector_dsn=pgvector_dsn,
+            qdrant_url=qdrant_url,
+            lancedb_path=lancedb_path,
+            chroma_path=chroma_path,
+            all_adapters=all_adapters,
+            adapter=adapter,
+            k=k,
+            repeats=repeats,
+            profile=profile,
+        )
+    except _USER_FACING_ERRORS as exc:
+        _handle_user_error(exc)
+
+
+def _bench_impl(
+    *,
+    encoded: Path,
+    out: Path,
+    pgvector_dsn: str | None,
+    qdrant_url: str | None,
+    lancedb_path: Path | None,
+    chroma_path: Path | None,
+    all_adapters: bool,
+    adapter: list[str] | None,
+    k: int,
+    repeats: int,
+    profile: str,
+) -> None:
     from vdbbench.bench import run_bench  # noqa: PLC0415
     from vdbbench.embed import load_encoded_bundle  # noqa: PLC0415
 
@@ -371,6 +454,13 @@ def plot(
     ),
 ) -> None:
     """Regenerate every standard chart from a bench summary."""
+    try:
+        _plot_impl(summary=summary, out=out, baseline_label=baseline_label)
+    except _USER_FACING_ERRORS as exc:
+        _handle_user_error(exc)
+
+
+def _plot_impl(*, summary: Path, out: Path, baseline_label: str | None) -> None:
     from vdbbench.plot import plot_all  # noqa: PLC0415
 
     paths = plot_all(summary, out, baseline_label=baseline_label)
