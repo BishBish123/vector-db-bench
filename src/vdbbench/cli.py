@@ -131,7 +131,14 @@ def prep(
         help="Corpus source: 'synthetic', 'msmarco', or any BeIR/<name> identifier.",
     ),
     sample_size: int = typer.Option(
-        10_000, help="Number of passages to keep (synthetic = exact, BEIR = sub-sample)."
+        5_000,
+        help=(
+            "Number of passages to keep (synthetic = exact, BEIR = "
+            "sub-sample). Default 5000 matches the demo bundle "
+            "committed under results/demo/, so a bare `vdbbench prep` "
+            "produces the same scale the README quotes; override via "
+            "`--sample-size` for larger sweeps."
+        ),
     ),
     embed_model: str = typer.Option(
         "BAAI/bge-small-en-v1.5", help="sentence-transformers model id."

@@ -96,6 +96,7 @@ The `--lancedb-path` and `--chroma-path` flags (used by `--all`) are skipped on 
 
 - **Corpora.** MS-MARCO via [BeIR/msmarco](https://huggingface.co/datasets/BeIR/msmarco) (sample-size capped, all judged passages always kept), or any other BEIR dataset (`scifact`, `nfcorpus`, `fiqa`, …). A pure-Python synthetic corpus with brute-force ground truth is included for CI and smoke tests.
 - **Embedding model.** `BAAI/bge-small-en-v1.5` (384-dim) by default; pluggable via `--embed-model`.
+- **Sample size.** `--sample-size` defaults to 5 000 across `vdbbench prep` (matches the committed `results/demo/`). `make bench-100k` and `make bench-1m` override explicitly to 100 000 / 1 000 000.
 - **Hardware.** Single machine, documented per run. No GPU unless the run says so.
 - **Fairness.** Per-spec warm-up queries (default 10) are discarded before timing; `repeats > 1` runs the full query set multiple passes.
 - **Repeats.** Per-(db, params) summary aggregates across `repeats × n_queries` measured timings.

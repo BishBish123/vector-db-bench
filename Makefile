@@ -3,6 +3,10 @@ SHELL := /bin/bash
 
 PYTHON ?= python3
 UV ?= uv
+# `make prep` / `make bench-100k` use SAMPLE_SIZE — 100k is the right
+# default for the 100k-scale sweep target. The CLI's own --sample-size
+# default is 5000 (demo scale) so `uv run vdbbench prep` without a flag
+# matches results/demo/ — see `make bench-demo` for the demo wrapper.
 SAMPLE_SIZE ?= 100000
 EMBED_MODEL ?= BAAI/bge-small-en-v1.5
 

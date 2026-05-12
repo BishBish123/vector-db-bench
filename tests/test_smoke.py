@@ -51,6 +51,16 @@ def test_cli_help_runs() -> None:
     assert "bench" in result.output
 
 
+def test_cli_prep_default_sample_size_is_5000() -> None:
+    """`vdbbench prep --help` advertises the 5000-default that matches
+    the committed demo bundle. Pin it so a future "round number" drift
+    away from 5000 doesn't silently break the README's claim that
+    `uv run vdbbench prep` reproduces the demo numbers."""
+    result = CliRunner().invoke(app, ["prep", "--help"])
+    assert result.exit_code == 0, result.output
+    assert "5000" in result.output
+
+
 def test_cli_bench_default_out_lives_under_results_run() -> None:
     """`vdbbench bench --help` advertises `results/run/` as the default
     --out so the top-level results/ tree stays clean (only named scale
