@@ -51,6 +51,7 @@ coverage.xml
 data/
 results/raw/
 results/runs/
+results/run/
 results/100k/
 .bench_cache/
 # Smoke pipeline scratch output (`make smoke` / scripts/smoke_pipeline.py).

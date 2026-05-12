@@ -51,6 +51,24 @@ def test_cli_help_runs() -> None:
     assert "bench" in result.output
 
 
+def test_cli_bench_default_out_lives_under_results_run() -> None:
+    """`vdbbench bench --help` advertises `results/run/` as the default
+    --out so the top-level results/ tree stays clean (only named scale
+    subdirs like demo / 100k / full live there directly)."""
+    result = CliRunner().invoke(app, ["bench", "--help"])
+    assert result.exit_code == 0, result.output
+    assert "results/run" in result.output
+
+
+def test_cli_plot_default_summary_tracks_bench_default() -> None:
+    """`vdbbench plot` default --summary points at the same results/run/
+    subdir as `vdbbench bench --out` — running them as a pair without
+    explicit paths must keep working."""
+    result = CliRunner().invoke(app, ["plot", "--help"])
+    assert result.exit_code == 0, result.output
+    assert "results/run/summary.parquet" in result.output
+
+
 def test_cli_bench_help_documents_all_flag() -> None:
     """`vdbbench bench --help` must surface the new --all flag.
 

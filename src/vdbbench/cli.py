@@ -290,7 +290,17 @@ def _build_bench_specs(
 @app.command()
 def bench(
     encoded: Path = typer.Option(Path("data/encoded"), help="Encoded bundle directory."),
-    out: Path = typer.Option(Path("results"), help="Where to write timings + summary parquet."),
+    out: Path = typer.Option(
+        Path("results/run"),
+        help=(
+            "Where to write timings + summary parquet. Defaults to "
+            "results/run/ so the repo's top-level results/ tree only "
+            "ever holds named scale subdirs (results/demo/, "
+            "results/100k/, results/full/, ...) — `make bench-demo` / "
+            "`make bench-100k` override this explicitly to land in "
+            "their conventional homes."
+        ),
+    ),
     pgvector_dsn: str | None = typer.Option(
         None, help="If set, run the pgvector adapter against this DSN."
     ),
@@ -439,7 +449,12 @@ def _bench_impl(
 @app.command()
 def plot(
     summary: Path = typer.Option(
-        Path("results/summary.parquet"), help="Path to bench summary parquet."
+        Path("results/run/summary.parquet"),
+        help=(
+            "Path to bench summary parquet. Default tracks the "
+            "`vdbbench bench` default of results/run/ so the two "
+            "commands stay reachable as a pair without an explicit path."
+        ),
     ),
     out: Path = typer.Option(Path("assets"), help="Where to write the chart files."),
     baseline_label: str | None = typer.Option(
