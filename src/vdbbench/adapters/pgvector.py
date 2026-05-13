@@ -51,11 +51,24 @@ _DISTANCE_OPS: dict[str, tuple[str, str]] = {
 # vector from a caller who builds a `table_name` from untrusted input.
 _PG_IDENT_RE = __import__("re").compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
+# Postgres caps identifiers at NAMEDATALEN-1 = 63 bytes (UTF-8). Beyond
+# that it silently truncates — which would let two distinct per-run table
+# names collapse onto the same on-disk table and corrupt each other's
+# results, the exact failure mode the uuid suffix exists to prevent. We
+# enforce the limit here rather than let Postgres truncate quietly.
+_PG_IDENT_MAX_BYTES = 63
+
 
 def _validate_pg_identifier(name: str) -> None:
     if not isinstance(name, str) or not _PG_IDENT_RE.match(name):
         raise ValueError(
             f"invalid pg identifier {name!r}; expected ^[A-Za-z_][A-Za-z0-9_]*$"
+        )
+    encoded_len = len(name.encode("utf-8"))
+    if encoded_len > _PG_IDENT_MAX_BYTES:
+        raise ValueError(
+            f"invalid pg identifier {name!r}: {encoded_len} bytes exceeds "
+            f"Postgres NAMEDATALEN-1 limit of {_PG_IDENT_MAX_BYTES} bytes"
         )
 
 

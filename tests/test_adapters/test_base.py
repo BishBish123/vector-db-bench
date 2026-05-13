@@ -169,3 +169,30 @@ class TestPgVectorTableNameValidation:
         adapter = PgVectorAdapter(dsn="postgresql://example/none")
         adapter.set_table_name("vdbbench_vectors_deadbeef")
         assert adapter._table == "vdbbench_vectors_deadbeef"
+
+    def test_set_table_name_rejects_over_63_bytes(self) -> None:
+        """Postgres truncates identifiers >63 bytes silently — two
+        distinct names can collapse to the same on-disk table and
+        corrupt each other's results. We raise rather than let the
+        truncation pass."""
+        pytest.importorskip("pgvector")
+        from vdbbench.adapters.pgvector import PgVectorAdapter  # noqa: PLC0415
+
+        adapter = PgVectorAdapter(dsn="postgresql://example/none")
+        # 63 bytes exact is the documented limit and must pass.
+        name_63 = "a" + "b" * 62
+        assert len(name_63.encode("utf-8")) == 63
+        adapter.set_table_name(name_63)
+        # 64 bytes must fail with the byte-limit message.
+        name_64 = "a" + "b" * 63
+        assert len(name_64.encode("utf-8")) == 64
+        with pytest.raises(ValueError, match="exceeds Postgres NAMEDATALEN-1"):
+            adapter.set_table_name(name_64)
+
+    def test_constructor_rejects_over_63_bytes(self) -> None:
+        pytest.importorskip("pgvector")
+        from vdbbench.adapters.pgvector import PgVectorAdapter  # noqa: PLC0415
+
+        long_table = "a" + "b" * 63  # 64 bytes
+        with pytest.raises(ValueError, match="exceeds Postgres NAMEDATALEN-1"):
+            PgVectorAdapter(dsn="postgresql://example/none", table=long_table)
