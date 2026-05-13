@@ -18,6 +18,13 @@ QDRANT_PORT ?= 6333
 export PGVECTOR_PORT
 export QDRANT_PORT
 
+# Derive the bench-side DSN / URL from the same vars so `make bench-demo
+# PGVECTOR_PORT=5444` actually reaches the rebound container instead of
+# silently hitting whatever happens to be on 5433. Override these
+# directly if you're benching against a non-Docker service.
+PGVECTOR_DSN ?= postgresql://bench:bench@localhost:$(PGVECTOR_PORT)/bench
+QDRANT_URL ?= http://localhost:$(QDRANT_PORT)
+
 # ---------------------------------------------------------------------------
 # Help
 # ---------------------------------------------------------------------------
@@ -87,7 +94,8 @@ prep: ## Build corpus + ground-truth (deterministic)
 
 .PHONY: bench
 bench: ## Run benchmark across all DBs at SAMPLE_SIZE (default 100k) — writes results/100k/
-	$(UV) run vdbbench bench --all --out results/100k
+	$(UV) run vdbbench bench --all --out results/100k \
+		--pgvector-dsn $(PGVECTOR_DSN) --qdrant-url $(QDRANT_URL)
 
 .PHONY: smoke
 smoke: ## End-to-end offline smoke (no Docker, no model download) — exercises corpus → encode → bench → plot
@@ -96,7 +104,8 @@ smoke: ## End-to-end offline smoke (no Docker, no model download) — exercises 
 .PHONY: bench-demo
 bench-demo: ## Demo pipeline reproducing the README numbers: synthetic 5k vectors @ dim=64, writes results/demo/
 	$(UV) run vdbbench prep  --out data/encoded-demo --dataset synthetic --sample-size 5000 --dim 64
-	$(UV) run vdbbench bench --encoded data/encoded-demo --out results/demo --all
+	$(UV) run vdbbench bench --encoded data/encoded-demo --out results/demo --all \
+		--pgvector-dsn $(PGVECTOR_DSN) --qdrant-url $(QDRANT_URL)
 	$(UV) run vdbbench plot  --summary results/demo/summary.parquet --out assets
 
 .PHONY: bench-100k
@@ -105,7 +114,8 @@ bench-100k: prep bench plots ## 100k-scale sweep (uses SAMPLE_SIZE/EMBED_MODEL);
 .PHONY: bench-1m
 bench-1m: ## Full 1M MS-MARCO sweep (results/full/summary.parquet; ~hours, no commit)
 	$(UV) run vdbbench prep  --dataset msmarco --sample-size 1000000 --out data/encoded-1m
-	$(UV) run vdbbench bench --encoded data/encoded-1m --out results/full --all --profile p99
+	$(UV) run vdbbench bench --encoded data/encoded-1m --out results/full --all --profile p99 \
+		--pgvector-dsn $(PGVECTOR_DSN) --qdrant-url $(QDRANT_URL)
 	$(UV) run vdbbench plot  --summary results/full/summary.parquet --out assets/full
 
 .PHONY: plots
