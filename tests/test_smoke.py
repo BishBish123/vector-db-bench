@@ -398,6 +398,104 @@ def test_cli_bench_adapter_memory_alias_resolves_to_exact(tmp_path: Path) -> Non
     assert result.exit_code == 0, result.output
 
 
+def test_adapter_selection_excludes_unselected_with_creds(tmp_path: Path) -> None:
+    """`--adapter pgvector --qdrant-url ...` is a contradiction.
+
+    The previous behaviour silently ran qdrant alongside pgvector
+    because ``--qdrant-url`` built a spec independently of ``--adapter``.
+    Now ``--adapter`` is authoritative — passing a per-adapter flag for
+    an unselected adapter raises a user-facing error so the typo isn't
+    a silently-double-billed run.
+    """
+    captured: dict[str, object] = {}
+
+    def _fake(
+        _encoded: object,
+        specs: list[Any],
+        *,
+        progress: bool = False,
+        tolerate_failures: bool = False,
+    ) -> BenchResult:
+        del progress, tolerate_failures
+        captured["dbs"] = [s.adapter.name for s in specs]
+        return BenchResult(
+            timings=pd.DataFrame(),
+            summary=pd.DataFrame([{"db": s.adapter.name} for s in specs]),
+            manifest={"schema_version": 1},
+        )
+
+    out = tmp_path / "results"
+    runner = CliRunner()
+    with (
+        patch("vdbbench.embed.load_encoded_bundle", _stub_load_encoded_bundle),
+        patch("vdbbench.bench.run_bench", _fake),
+    ):
+        result = runner.invoke(
+            app,
+            [
+                "bench",
+                "--encoded",
+                str(tmp_path / "encoded"),
+                "--out",
+                str(out),
+                "--adapter",
+                "pgvector",
+                "--qdrant-url",
+                "http://localhost:6333",
+            ],
+        )
+    # User-facing ValueError -> exit 2 with a clean message; no qdrant
+    # spec was constructed.
+    assert result.exit_code == 2, result.output
+    assert "qdrant" in result.output
+    assert "--qdrant-url" in result.output
+    assert "captured" not in result.output  # no progress was printed
+    assert "dbs" not in captured  # run_bench was never called
+
+
+def test_adapter_selection_authoritative_drops_unselected_creds(tmp_path: Path) -> None:
+    """When --adapter is set, only the selected adapters are wired —
+    even if other URLs/paths are absent, no spec is built for them.
+    With --adapter exact, only the in-process brute-force adapter runs."""
+    captured: dict[str, object] = {}
+
+    def _fake(
+        _encoded: object,
+        specs: list[Any],
+        *,
+        progress: bool = False,
+        tolerate_failures: bool = False,
+    ) -> BenchResult:
+        del progress, tolerate_failures
+        captured["dbs"] = [s.adapter.name for s in specs]
+        return BenchResult(
+            timings=pd.DataFrame(),
+            summary=pd.DataFrame([{"db": s.adapter.name} for s in specs]),
+            manifest={"schema_version": 1},
+        )
+
+    out = tmp_path / "results"
+    runner = CliRunner()
+    with (
+        patch("vdbbench.embed.load_encoded_bundle", _stub_load_encoded_bundle),
+        patch("vdbbench.bench.run_bench", _fake),
+    ):
+        result = runner.invoke(
+            app,
+            [
+                "bench",
+                "--encoded",
+                str(tmp_path / "encoded"),
+                "--out",
+                str(out),
+                "--adapter",
+                "exact",
+            ],
+        )
+    assert result.exit_code == 0, result.output
+    assert captured["dbs"] == ["exact"]
+
+
 def test_cli_bench_single_adapter_still_hard_fails(tmp_path: Path) -> None:
     """Without `--all`, a connection error on the explicitly-named adapter
     must propagate — there's no other adapter to keep going for, and the

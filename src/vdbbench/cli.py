@@ -82,6 +82,90 @@ def _resolve_adapter_names(names: list[str] | None) -> set[str]:
     return resolved
 
 
+def _reject_unselected_adapter_flags(
+    selected: set[str],
+    *,
+    pgvector_dsn: str | None,
+    qdrant_url: str | None,
+    lancedb_path: Path | None,
+    chroma_path: Path | None,
+) -> None:
+    """Refuse per-adapter flags for adapters the user didn't pick via --adapter.
+
+    Without this, ``--adapter pgvector --qdrant-url http://...`` silently
+    runs both because each URL/path flag used to build its own spec
+    regardless of ``--adapter``. The selection is authoritative — a flag
+    pointing at an unselected adapter is a contradiction.
+    """
+    contradictions: list[tuple[str, str]] = []
+    if pgvector_dsn is not None and "pgvector" not in selected:
+        contradictions.append(("pgvector", "--pgvector-dsn"))
+    if qdrant_url is not None and "qdrant" not in selected:
+        contradictions.append(("qdrant", "--qdrant-url"))
+    if lancedb_path is not None and "lancedb" not in selected:
+        contradictions.append(("lancedb", "--lancedb-path"))
+    if chroma_path is not None and "chroma" not in selected:
+        contradictions.append(("chroma", "--chroma-path"))
+    if not contradictions:
+        return
+    # One ValueError listing all conflicts, so the user fixes them in
+    # one round-trip rather than discovering them one at a time.
+    parts = [
+        f"{flag} passed but {adapter!r} not in --adapter selection"
+        for adapter, flag in contradictions
+    ]
+    selection_list = ", ".join(sorted(selected)) or "(none)"
+    raise ValueError(
+        "; ".join(parts)
+        + f". --adapter selection: {selection_list}. Either add the missing "
+        "adapter(s) to --adapter or drop the conflicting flag(s)."
+    )
+
+
+def _apply_adapter_selection(
+    selected: set[str],
+    *,
+    pgvector_dsn: str | None,
+    qdrant_url: str | None,
+    lancedb_path: Path | None,
+    chroma_path: Path | None,
+) -> tuple[str | None, str | None, Path | None, Path | None]:
+    """Reduce the per-adapter knobs to only those the user picked via --adapter.
+
+    When the user passes ``--adapter``, that selection is authoritative —
+    any per-adapter URL/path flag for an *unselected* adapter is a
+    contradiction, not a quiet "build a spec for that adapter too".
+    Adapters in the selection that are missing creds get the standard
+    localhost defaults; adapters outside the selection have their creds
+    cleared so :func:`_build_bench_specs` can stay a pure data wiring
+    helper.
+    """
+    _reject_unselected_adapter_flags(
+        selected,
+        pgvector_dsn=pgvector_dsn,
+        qdrant_url=qdrant_url,
+        lancedb_path=lancedb_path,
+        chroma_path=chroma_path,
+    )
+    if "pgvector" in selected and pgvector_dsn is None:
+        pgvector_dsn = "postgresql://bench:bench@localhost:5433/bench"
+    if "qdrant" in selected and qdrant_url is None:
+        qdrant_url = "http://localhost:6333"
+    if "lancedb" in selected and lancedb_path is None:
+        lancedb_path = Path("data/lancedb")
+    if "chroma" in selected and chroma_path is None:
+        chroma_path = Path("data/chroma")
+    if "pgvector" not in selected:
+        pgvector_dsn = None
+    if "qdrant" not in selected:
+        qdrant_url = None
+    if "lancedb" not in selected:
+        lancedb_path = None
+    if "chroma" not in selected:
+        chroma_path = None
+    return pgvector_dsn, qdrant_url, lancedb_path, chroma_path
+
+
 def _apply_all_defaults(
     pgvector_dsn: str | None,
     qdrant_url: str | None,
@@ -400,14 +484,14 @@ def _bench_impl(
         pgvector_dsn, qdrant_url, lancedb_path, chroma_path = _apply_all_defaults(
             pgvector_dsn, qdrant_url, lancedb_path, chroma_path
         )
-    if "pgvector" in selected_adapters and pgvector_dsn is None:
-        pgvector_dsn = "postgresql://bench:bench@localhost:5433/bench"
-    if "qdrant" in selected_adapters and qdrant_url is None:
-        qdrant_url = "http://localhost:6333"
-    if "lancedb" in selected_adapters and lancedb_path is None:
-        lancedb_path = Path("data/lancedb")
-    if "chroma" in selected_adapters and chroma_path is None:
-        chroma_path = Path("data/chroma")
+    if selected_adapters:
+        pgvector_dsn, qdrant_url, lancedb_path, chroma_path = _apply_adapter_selection(
+            selected_adapters,
+            pgvector_dsn=pgvector_dsn,
+            qdrant_url=qdrant_url,
+            lancedb_path=lancedb_path,
+            chroma_path=chroma_path,
+        )
 
     enc = load_encoded_bundle(encoded)
     specs = _build_bench_specs(
