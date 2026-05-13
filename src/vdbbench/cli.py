@@ -381,15 +381,19 @@ def _build_bench_specs(
 @app.command()
 def bench(
     encoded: Path = typer.Option(Path("data/encoded"), help="Encoded bundle directory."),
-    out: Path = typer.Option(
-        Path("results/run"),
+    out: Path | None = typer.Option(
+        None,
         help=(
-            "Where to write timings + summary parquet. Defaults to "
-            "results/run/ so the repo's top-level results/ tree only "
-            "ever holds named scale subdirs (results/demo/, "
-            "results/100k/, results/full/, ...) — `make bench-demo` / "
-            "`make bench-100k` override this explicitly to land in "
-            "their conventional homes."
+            "Where to write timings + summary parquet. Defaults to a "
+            "timestamped subdir under results/run/ "
+            "(``results/run/<UTC-isoformat>-<short-uuid>/``) so two "
+            "parallel `vdbbench bench` invocations don't overwrite each "
+            "other's output. The repo's top-level results/ tree still "
+            "only holds named scale subdirs (results/demo/, "
+            "results/100k/, results/full/, ...); pass --out explicitly "
+            "to land outside results/run/ — `make bench-demo` / "
+            "`make bench-100k` do exactly that for their conventional "
+            "homes."
         ),
     ),
     pgvector_dsn: str | None = typer.Option(
@@ -461,10 +465,34 @@ def bench(
         _handle_user_error(exc)
 
 
+def _resolve_bench_out(out: Path | None) -> Path:
+    """Resolve the bench --out path, auto-suffixing the default.
+
+    When the user leaves --out unset, default to
+    ``results/run/<UTC-iso>-<short-uuid>/`` so two parallel `vdbbench
+    bench` invocations don't overwrite each other's parquet. Explicit
+    --out (e.g. `--out results/demo`) is used verbatim — the Makefile
+    targets that need a fixed location keep working unchanged.
+
+    UTC isoformat is filename-safe modulo the colon, which we replace
+    with `-` so the path round-trips through Windows shells too. The
+    short uuid suffix breaks ties when two runs happen in the same
+    second (CI matrices, scripts in tight loops).
+    """
+    if out is not None:
+        return out
+    import uuid as _uuid  # noqa: PLC0415
+    from datetime import UTC, datetime  # noqa: PLC0415
+
+    stamp = datetime.now(UTC).isoformat(timespec="seconds").replace(":", "-")
+    short = _uuid.uuid4().hex[:8]
+    return Path("results/run") / f"{stamp}-{short}"
+
+
 def _bench_impl(
     *,
     encoded: Path,
-    out: Path,
+    out: Path | None,
     pgvector_dsn: str | None,
     qdrant_url: str | None,
     lancedb_path: Path | None,
@@ -477,6 +505,9 @@ def _bench_impl(
 ) -> None:
     from vdbbench.bench import run_bench  # noqa: PLC0415
     from vdbbench.embed import load_encoded_bundle  # noqa: PLC0415
+
+    out = _resolve_bench_out(out)
+    console.print(f"[green]output[/]: {out}")
 
     selected_adapters = _resolve_adapter_names(adapter)
     run_exact = "exact" in selected_adapters
@@ -537,14 +568,49 @@ def _bench_impl(
         raise typer.Exit(code=1)
 
 
+def _resolve_plot_summary(summary: Path | None) -> Path:
+    """Resolve --summary, auto-picking the most recent results/run/ subdir.
+
+    The bench default writes to ``results/run/<timestamp>-<short-uuid>/``
+    so plot can no longer point at a fixed path. When --summary is
+    unset, we look under ``results/run/`` for subdirs containing a
+    ``summary.parquet`` and pick the most recently modified one — which
+    matches what a user means by "plot the run I just did". If nothing
+    is there, raise ValueError so the CLI prints a clean error instead
+    of a FileNotFoundError on a path the user never typed.
+    """
+    if summary is not None:
+        return summary
+    root = Path("results/run")
+    if not root.is_dir():
+        raise ValueError(
+            "no results/run/ directory found; pass --summary <path> "
+            "explicitly (e.g. --summary results/demo/summary.parquet)"
+        )
+    candidates = [
+        sub / "summary.parquet"
+        for sub in root.iterdir()
+        if sub.is_dir() and (sub / "summary.parquet").is_file()
+    ]
+    if not candidates:
+        raise ValueError(
+            f"no summary.parquet found under {root}/; pass --summary "
+            "<path> explicitly (e.g. --summary results/demo/summary.parquet)"
+        )
+    return max(candidates, key=lambda p: p.stat().st_mtime)
+
+
 @app.command()
 def plot(
-    summary: Path = typer.Option(
-        Path("results/run/summary.parquet"),
+    summary: Path | None = typer.Option(
+        None,
+        "--summary",
         help=(
-            "Path to bench summary parquet. Default tracks the "
-            "`vdbbench bench` default of results/run/ so the two "
-            "commands stay reachable as a pair without an explicit path."
+            "Path to bench summary parquet. When unset, picks the most "
+            "recent ``results/run/<stamp>-<uuid>/summary.parquet`` so a "
+            "bare `vdbbench bench && vdbbench plot` keeps working — but "
+            "you'll get a clean error (rather than a missing-file "
+            "traceback) if no run is there."
         ),
     ),
     out: Path = typer.Option(Path("assets"), help="Where to write the chart files."),
@@ -562,7 +628,8 @@ def plot(
 ) -> None:
     """Regenerate every standard chart from a bench summary."""
     try:
-        _plot_impl(summary=summary, out=out, baseline_label=baseline_label)
+        resolved = _resolve_plot_summary(summary)
+        _plot_impl(summary=resolved, out=out, baseline_label=baseline_label)
     except _USER_FACING_ERRORS as exc:
         _handle_user_error(exc)
 

@@ -61,22 +61,112 @@ def test_cli_prep_default_sample_size_is_5000() -> None:
     assert "5000" in result.output
 
 
+def test_resolve_bench_out_default_lives_under_results_run() -> None:
+    """The auto-default lands under results/run/ — explicit --out keeps
+    bypassing the auto-suffix so Make targets that pin a fixed path
+    (results/demo, results/100k, results/full) keep working."""
+    from vdbbench.cli import _resolve_bench_out  # noqa: PLC0415
+
+    auto = _resolve_bench_out(None)
+    assert auto.parent == Path("results/run")
+    explicit = _resolve_bench_out(Path("results/demo"))
+    assert explicit == Path("results/demo")
+
+
+def test_resolve_bench_out_default_is_unique_per_call() -> None:
+    """Two unstamped --out resolutions must produce distinct paths so
+    parallel `vdbbench bench` invocations can't overwrite each other."""
+    from vdbbench.cli import _resolve_bench_out  # noqa: PLC0415
+
+    a = _resolve_bench_out(None)
+    b = _resolve_bench_out(None)
+    assert a != b
+
+
 def test_cli_bench_default_out_lives_under_results_run() -> None:
     """`vdbbench bench --help` advertises `results/run/` as the default
-    --out so the top-level results/ tree stays clean (only named scale
-    subdirs like demo / 100k / full live there directly)."""
+    --out parent so the top-level results/ tree stays clean (only named
+    scale subdirs like demo / 100k / full live there directly)."""
     result = CliRunner().invoke(app, ["bench", "--help"])
     assert result.exit_code == 0, result.output
     assert "results/run" in result.output
 
 
-def test_cli_plot_default_summary_tracks_bench_default() -> None:
-    """`vdbbench plot` default --summary points at the same results/run/
-    subdir as `vdbbench bench --out` — running them as a pair without
-    explicit paths must keep working."""
-    result = CliRunner().invoke(app, ["plot", "--help"])
-    assert result.exit_code == 0, result.output
-    assert "results/run/summary.parquet" in result.output
+def test_cli_plot_default_summary_picks_most_recent_run(tmp_path: Path) -> None:
+    """`vdbbench plot` (no --summary) resolves to the most recently
+    modified ``results/run/<stamp>/summary.parquet`` so `bench && plot`
+    keeps working without explicit paths even after the bench default
+    moved to a timestamped subdir."""
+    import os  # noqa: PLC0415
+
+    cwd = Path.cwd()
+    try:
+        os.chdir(tmp_path)
+        run_root = tmp_path / "results" / "run"
+        older = run_root / "2025-01-01T00-00-00+00-00-aaaaaaaa"
+        newer = run_root / "2025-06-01T00-00-00+00-00-bbbbbbbb"
+        for sub in (older, newer):
+            sub.mkdir(parents=True)
+            # Populate a minimal summary parquet so plot has something
+            # to chart; we only need the resolution to pick the right
+            # one, so a single-row frame is enough.
+            pd.DataFrame(
+                {
+                    "db": ["mem"],
+                    "label": ["mem:a"],
+                    "params_hash": ["a"],
+                    "params_json": ["{}"],
+                    "profile": ["warm"],
+                    "n_passages": [1],
+                    "n_queries": [1],
+                    "dim": [1],
+                    "ingest_s": [0.01],
+                    "ingest_throughput_vps": [10.0],
+                    "index_s": [0.01],
+                    "index_bytes": [1],
+                    "latency_ms_mean": [1.0],
+                    "latency_ms_p50": [1.0],
+                    "latency_ms_p95": [1.0],
+                    "latency_ms_p99": [1.0],
+                    "recall_at_k_mean": [1.0],
+                    "recall_at_k_p50": [1.0],
+                    "ndcg_at_k_mean": [1.0],
+                    "qps_estimate": [1000.0],
+                }
+            ).to_parquet(sub / "summary.parquet", index=False)
+        # Force `newer` to have a strictly later mtime than `older`.
+        os.utime(older / "summary.parquet", (1_000_000_000, 1_000_000_000))
+        os.utime(newer / "summary.parquet", (2_000_000_000, 2_000_000_000))
+        result = CliRunner().invoke(
+            app,
+            [
+                "plot",
+                "--out",
+                str(tmp_path / "assets"),
+                "--baseline-label",
+                "mem:a",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+    finally:
+        os.chdir(cwd)
+
+
+def test_cli_plot_default_with_no_runs_errors_cleanly(tmp_path: Path) -> None:
+    """No results/run/ subdirs => clean ValueError (exit 2), not a
+    Python traceback. Catches the case where the user runs `vdbbench
+    plot` from a fresh checkout without ever running bench."""
+    import os  # noqa: PLC0415
+
+    cwd = Path.cwd()
+    try:
+        os.chdir(tmp_path)
+        result = CliRunner().invoke(app, ["plot", "--out", str(tmp_path / "assets")])
+        assert result.exit_code == 2, result.output
+        assert "Traceback" not in result.output
+        assert "summary" in result.output.lower()
+    finally:
+        os.chdir(cwd)
 
 
 def test_cli_bench_help_documents_all_flag() -> None:
