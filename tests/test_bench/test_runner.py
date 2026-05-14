@@ -406,6 +406,44 @@ class TestRunBench:
         assert int(row["index_rss_bytes"]) == 5_000_000
 
 
+class TestGenerateTableName:
+    """``_generate_table_name`` underpins per-run isolation; it has to
+    return a Postgres-legal identifier even when the caller passes an
+    over-long prefix."""
+
+    def test_default_prefix_fits_under_63_bytes(self) -> None:
+        from vdbbench.bench.runner import _generate_table_name  # noqa: PLC0415
+
+        name = _generate_table_name()
+        assert name.startswith("vdbbench_vectors_")
+        assert len(name.encode("utf-8")) <= 63
+
+    def test_default_suffix_is_16_hex_chars(self) -> None:
+        """Bumped from 8 hex (32 bits) to 16 hex (64 bits) so the
+        birthday-collision probability over realistic concurrent runs is
+        negligible."""
+        from vdbbench.bench.runner import _generate_table_name  # noqa: PLC0415
+
+        name = _generate_table_name()
+        suffix = name.rsplit("_", 1)[-1]
+        assert len(suffix) == 16
+        # Hex only.
+        assert all(c in "0123456789abcdef" for c in suffix)
+
+    def test_long_prefix_is_trimmed_to_fit(self) -> None:
+        """Pass a 100-char prefix; the function trims the prefix (not
+        the suffix) so the entropy that protects the race is preserved."""
+        from vdbbench.bench.runner import _generate_table_name  # noqa: PLC0415
+
+        long_prefix = "a" * 100
+        name = _generate_table_name(prefix=long_prefix)
+        assert len(name.encode("utf-8")) <= 63
+        # Suffix kept verbatim — the underscore + 16 hex tail.
+        assert "_" in name
+        suffix = name.rsplit("_", 1)[-1]
+        assert len(suffix) == 16
+
+
 class TestPeakRssTracker:
     def test_peak_rss_only_increases(self) -> None:
         """Multiple samples with descending values — peak holds the max so

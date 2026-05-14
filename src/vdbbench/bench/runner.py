@@ -108,14 +108,47 @@ _PROFILE_DEFAULTS: dict[str, dict[str, int]] = {
 _UNSET_INT = -1
 
 
-def _generate_table_name(prefix: str = "vdbbench_vectors") -> str:
-    """Return ``vdbbench_vectors_<8hex>`` for one bench-run's isolation.
+# Postgres caps identifiers at NAMEDATALEN-1 = 63 bytes; mirrored from
+# vdbbench.adapters.pgvector to keep the runner self-contained without a
+# circular import. Both ends enforce the same limit; the duplication is
+# documented at both sites.
+_PG_IDENT_MAX_BYTES = 63
 
-    Eight hex chars is plenty (~4B namespace) for the "two parallel
-    runs against the same Postgres" race the per-run table fixes;
-    keeping it short keeps log output readable.
+# Hex chars from uuid4 to use as the per-run suffix. 16 hex = 64 bits of
+# entropy, the upper half of a uuid4 — the birthday-collision probability
+# over the lifetime of any realistic concurrent-run scenario is
+# negligible. The previous 8 hex (32 bits) gave only ~10% collision
+# probability after ~100k concurrent runs — low, but not the "no
+# collisions" guarantee per-run isolation needs.
+_TABLE_NAME_SUFFIX_HEX = 16
+
+
+def _generate_table_name(prefix: str = "vdbbench_vectors") -> str:
+    """Return ``<prefix>_<16hex>`` for one bench-run's table isolation.
+
+    Two parallel ``run_bench`` calls against the same Postgres can't
+    share a table, so each run gets a uuid-suffixed name. The full
+    identifier is capped at Postgres' NAMEDATALEN-1 (63 bytes) — if the
+    caller passes an unusually long prefix, we trim the prefix (not the
+    suffix) so the entropy that protects the race is preserved.
     """
-    return f"{prefix}_{uuid.uuid4().hex[:8]}"
+    suffix = uuid.uuid4().hex[:_TABLE_NAME_SUFFIX_HEX]
+    # +1 for the underscore separator between prefix and suffix.
+    max_prefix_bytes = _PG_IDENT_MAX_BYTES - len(suffix) - 1
+    if max_prefix_bytes <= 0:
+        # Should never happen with a sane suffix size; if a future
+        # change bumps the suffix past 62 bytes, fall back to
+        # suffix-only with a leading "v" so the result is still a legal
+        # identifier (must start with a letter or underscore).
+        return f"v{suffix}"[:_PG_IDENT_MAX_BYTES]
+    if len(prefix.encode("utf-8")) > max_prefix_bytes:
+        # uuid4 hex is ASCII so a byte-length truncate by chars is
+        # exact for the suffix; only the *prefix* could be multibyte
+        # (UTF-8 caller-supplied), so re-check after the char-trim.
+        prefix = prefix[:max_prefix_bytes]
+        while len(prefix.encode("utf-8")) > max_prefix_bytes:
+            prefix = prefix[:-1]
+    return f"{prefix}_{suffix}"
 
 
 @dataclass(frozen=True)
