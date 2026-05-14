@@ -643,11 +643,22 @@ def _plot_impl(*, summary: Path, out: Path, baseline_label: str | None) -> None:
     # them; the CLI layer turns them into a Rich-coloured advisory line
     # so the user gets a tidy `[yellow]note[/]: ...` instead of a
     # Python-style `UserWarning: ...` blob in stderr.
+    #
+    # Re-emit only warnings whose origin is ``vdbbench.plot.charts``.
+    # The previous implementation re-rendered every captured UserWarning
+    # as a vdbbench advisory, which laundered third-party warnings
+    # (matplotlib / pandas / etc.) through the CLI's note channel and
+    # hid messages the user genuinely needed to see.
     with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always", UserWarning)
+        # Inside the block: capture every warning so we can decide what
+        # to surface ourselves. Restoring on exit means pytest's
+        # outer ``-W error`` filter is unaffected.
+        warnings.simplefilter("always")
         paths = plot_all(summary, out, baseline_label=baseline_label)
     for w in caught:
-        if issubclass(w.category, UserWarning):
+        if issubclass(w.category, UserWarning) and getattr(w, "filename", "").endswith(
+            "vdbbench/plot/charts.py"
+        ):
             console.print(f"[yellow]note[/]: {w.message}")
     for name, (png, svg) in paths.items():
         console.print(f"[green]{name}[/]: {png.name} + {svg.name}")

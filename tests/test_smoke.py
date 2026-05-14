@@ -304,6 +304,69 @@ def test_cli_bench_all_fails_when_no_adapter_succeeds(tmp_path: Path) -> None:
     assert "every adapter failed" in result.output
 
 
+def test_cli_plot_unrelated_userwarning_not_rerendered_as_note(tmp_path: Path) -> None:
+    """A UserWarning from outside ``vdbbench.plot.charts`` (e.g. a
+    downstream library) must NOT be re-rendered as a Rich `[yellow]note[/]`
+    line. The CLI's catch_warnings filter is scoped to vdbbench's own
+    plot module so third-party warnings stay visible as themselves
+    rather than getting laundered through the CLI's advisory channel."""
+    import warnings as _warnings  # noqa: PLC0415
+
+    summary = tmp_path / "summary.parquet"
+    out = tmp_path / "out"
+    pd.DataFrame(
+        {
+            "db": ["mem"],
+            "label": ["mem:a"],
+            "params_hash": ["a"],
+            "params_json": ["{}"],
+            "profile": ["warm"],
+            "n_passages": [10],
+            "n_queries": [2],
+            "dim": [4],
+            "ingest_s": [0.01],
+            "ingest_throughput_vps": [1000.0],
+            "index_s": [0.01],
+            "index_bytes": [1],
+            "latency_ms_mean": [1.0],
+            "latency_ms_p50": [1.0],
+            "latency_ms_p95": [1.0],
+            "latency_ms_p99": [1.0],
+            "recall_at_k_mean": [1.0],
+            "recall_at_k_p50": [1.0],
+            "ndcg_at_k_mean": [1.0],
+            "qps_estimate": [1000.0],
+        }
+    ).to_parquet(summary, index=False)
+
+    # Wrap plot_all so it emits a UserWarning from a non-charts module
+    # (this test file). The CLI must not surface that warning as a
+    # vdbbench advisory.
+    from vdbbench.plot import plot_all as _orig_plot_all  # noqa: PLC0415
+
+    def _plot_all_with_alien_warning(*args: object, **kwargs: object) -> object:
+        _warnings.warn(
+            "alien-warning-from-downstream-library", UserWarning, stacklevel=2
+        )
+        return _orig_plot_all(*args, **kwargs)  # type: ignore[arg-type]
+
+    with patch("vdbbench.plot.plot_all", _plot_all_with_alien_warning):
+        result = CliRunner().invoke(
+            app,
+            [
+                "plot",
+                "--summary",
+                str(summary),
+                "--out",
+                str(out),
+                "--baseline-label",
+                "mem:a",
+            ],
+        )
+    assert result.exit_code == 0, result.output
+    assert "alien-warning-from-downstream-library" not in result.output
+
+
 def test_cli_plot_swallows_userwarning_into_rich_note(tmp_path: Path) -> None:
     """When `plot_all` (or its callees) emits a UserWarning — e.g. the
     speedup baseline fallback — the CLI catches it and re-emits as a
