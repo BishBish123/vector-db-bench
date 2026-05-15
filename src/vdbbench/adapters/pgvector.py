@@ -31,6 +31,7 @@ from __future__ import annotations
 import contextlib
 import math
 import time
+from pathlib import Path
 from typing import Any, cast
 
 import numpy as np
@@ -171,16 +172,77 @@ class PgVectorAdapter:
         # then close. Tolerate teardown being called twice in a row (the
         # contract test exercises that path).
         if self._conn is not None:
-            try:
-                with self._conn.cursor() as cur:
-                    cur.execute(f'DROP TABLE IF EXISTS "{self._table}"')
-                    self._conn.commit()
-            except Exception:
-                # If the connection died, fall through to close — we've
-                # already lost the table state we wanted to clean up.
-                pass
+            drop_ok = self._attempt_drop()
+            if not drop_ok:
+                # First attempt failed — open a fresh connection and retry
+                # once. This covers the common case where the long-lived
+                # connection has gone stale (e.g. pgvector container
+                # restarted mid-run) but the table still exists.
+                self._close_connection()
+                try:
+                    conn = self._open_connection()
+                    try:
+                        with conn.cursor() as cur:
+                            cur.execute(f'DROP TABLE IF EXISTS "{self._table}"')
+                            conn.commit()
+                    finally:
+                        with contextlib.suppress(Exception):
+                            conn.close()
+                except Exception as retry_exc:
+                    # Both attempts failed — table is orphaned. Log a
+                    # structured warning with the table name and a ready-to-run
+                    # psql cleanup command so an operator can recover manually.
+                    import logging as _logging  # noqa: PLC0415
+
+                    _log = _logging.getLogger(__name__)
+                    cleanup_cmd = (
+                        f"psql {self._dsn!r} -c 'DROP TABLE IF EXISTS \"{self._table}\";'"
+                    )
+                    _log.warning(
+                        "pgvector teardown: orphan table left behind",
+                        extra={
+                            "orphan_table": self._table,
+                            "dsn": self._dsn,
+                            "cleanup_cmd": cleanup_cmd,
+                            "retry_error": str(retry_exc),
+                        },
+                    )
+                    self._append_orphan_record(cleanup_cmd)
         self._close_connection()
         self._dim = None
+
+    def _attempt_drop(self) -> bool:
+        """Try to drop the bench table on the existing connection.
+
+        Returns ``True`` on success, ``False`` if any exception was raised.
+        """
+        try:
+            with self._conn.cursor() as cur:
+                cur.execute(f'DROP TABLE IF EXISTS "{self._table}"')
+                self._conn.commit()
+            return True
+        except Exception:
+            return False
+
+    def _append_orphan_record(self, cleanup_cmd: str) -> None:
+        """Append orphan table info to ``results/<run>/orphan_tables.txt``.
+
+        Best-effort — if the file can't be written the warning log is the
+        primary record. Kept in the current working directory so CI runs
+        and local bench runs naturally land in the right place.
+        """
+        import os  # noqa: PLC0415
+
+        orphan_dir = Path(os.getcwd()) / "results"
+        try:
+            orphan_dir.mkdir(parents=True, exist_ok=True)
+            record = (
+                f"orphan_table={self._table}\tdsn={self._dsn}\tcleanup={cleanup_cmd}\n"
+            )
+            with open(orphan_dir / "orphan_tables.txt", "a") as fh:
+                fh.write(record)
+        except OSError:
+            pass  # best-effort; warning log is the primary record
 
     # ---------- ingest ----------
 
