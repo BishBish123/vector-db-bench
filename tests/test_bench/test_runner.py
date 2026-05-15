@@ -495,6 +495,54 @@ class TestPeakRssTracker:
         assert row["profile"] == "warm"
 
 
+class TestPartialBench:
+    def test_partial_bench_writes_completed_specs(self, tmp_path: Path) -> None:
+        """On exception in spec N, specs 0..N-1 are written to disk and the
+        manifest carries ``partial=True`` so a reviewer knows the run was
+        interrupted and that not all specs are present."""
+        import json as _json  # noqa: PLC0415
+
+        encoded = _toy_encoded()
+
+        class FailingAdapter(_MemAdapter):
+            name = "failing"
+
+            def ingest(
+                self, ids: list[str], vectors: np.ndarray, batch_size: int = 1024
+            ) -> IngestStats:
+                raise RuntimeError("simulated mid-run failure")
+
+        good_spec = BenchSpec(adapter=_MemAdapter(), params={"v": "good"}, k=2)
+        bad_spec = BenchSpec(adapter=FailingAdapter(), params={"v": "bad"}, k=2)
+        out = tmp_path / "bench-partial"
+
+        with pytest.raises(RuntimeError, match="simulated mid-run failure"):
+            run_bench(encoded, [good_spec, bad_spec], out=out)
+
+        # The good spec's results must have been written before the failure.
+        assert (out / "summary.parquet").exists()
+        assert (out / "timings.parquet").exists()
+        summary = pd.read_parquet(out / "summary.parquet")
+        assert len(summary) == 1
+        assert summary.iloc[0]["db"] == "mem"
+
+        # Manifest must record partial=True.
+        manifest_path = out / "bench_manifest.json"
+        assert manifest_path.exists()
+        manifest = _json.loads(manifest_path.read_text())
+        assert manifest["partial"] is True
+
+    def test_full_bench_manifest_partial_is_false(self, tmp_path: Path) -> None:
+        """A run that completes without error writes ``partial=False``."""
+        import json as _json  # noqa: PLC0415
+
+        encoded = _toy_encoded()
+        out = tmp_path / "bench-full"
+        run_bench(encoded, [BenchSpec(adapter=_MemAdapter(), k=2)], out=out)
+        manifest = _json.loads((out / "bench_manifest.json").read_text())
+        assert manifest["partial"] is False
+
+
 class TestBenchSpecProfile:
     def test_warm_is_default(self) -> None:
         spec = BenchSpec(adapter=_MemAdapter())

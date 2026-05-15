@@ -299,12 +299,17 @@ class BenchResult:
     adapters to connection errors. The structured rows feed both the
     CLI summary line and the manifest, so the gap is auditable rather
     than silent.
+
+    ``partial`` is ``True`` when the result was interrupted by an
+    exception mid-run and only contains results for the specs that
+    completed before the failure. The manifest also carries this flag.
     """
 
     timings: pd.DataFrame
     summary: pd.DataFrame
     manifest: dict[str, object] = field(default_factory=dict)
     skipped: tuple[SkippedSpec, ...] = ()
+    partial: bool = False
 
     def save(self, root: str | Path) -> Path:
         out = Path(root)
@@ -342,6 +347,7 @@ def run_bench(
     *,
     progress: bool = False,
     tolerate_failures: bool = False,
+    out: str | Path | None = None,
 ) -> BenchResult:
     """Run every spec against `encoded` and return per-query + summary tables.
 
@@ -366,6 +372,15 @@ def run_bench(
       hide real regressions. ``BenchResult.skipped`` carries the
       structured skip rows so the CLI can surface them and the
       manifest can record them.
+
+    Incremental writes (``out`` is not ``None``):
+
+    When ``out`` is supplied, results are written to disk after every
+    successfully completed spec so a mid-run crash doesn't discard all
+    work. On an unhandled exception the completed specs (0..N-1) are
+    persisted with ``partial=True`` in both the ``BenchResult`` and the
+    ``bench_manifest.json`` before the exception is re-raised. The
+    caller can therefore inspect ``out/`` to see how far the run got.
     """
     pids: list[str] = encoded.bundle.passages["pid"].astype(str).tolist()
     qids: list[str] = encoded.bundle.queries["qid"].astype(str).tolist()
@@ -375,43 +390,75 @@ def run_bench(
     summary_rows: list[RunSummary] = []
     skipped: list[SkippedSpec] = []
 
+    out_path: Path | None = Path(out) if out is not None else None
+
     bench_started_at = _dt.datetime.now(_dt.UTC)
-    for spec in specs:
-        if progress:
-            print(f"[bench] {spec.display_label()} — setup", flush=True)
-        try:
-            _run_one_spec(
-                spec,
-                encoded,
-                pids,
-                qids,
-                qrel_index,
+    try:
+        for spec in specs:
+            if progress:
+                print(f"[bench] {spec.display_label()} — setup", flush=True)
+            try:
+                _run_one_spec(
+                    spec,
+                    encoded,
+                    pids,
+                    qids,
+                    qrel_index,
+                    timing_rows,
+                    summary_rows,
+                )
+            except _TOLERATED_FAILURE_TYPES as exc:
+                if not tolerate_failures:
+                    raise
+                reason = f"{type(exc).__name__}: {exc}"
+                skipped.append(
+                    SkippedSpec(
+                        label=spec.display_label(),
+                        db=spec.adapter.name,
+                        reason=str(exc),
+                        error_type=type(exc).__name__,
+                    )
+                )
+                # Structured single-line log — matches the `[bench]` prefix
+                # of the progress line so the skip is grep-able alongside
+                # the runs that succeeded.
+                print(
+                    f"[bench] SKIP adapter={spec.adapter.name} "
+                    f"label={spec.display_label()} reason={reason}",
+                    flush=True,
+                )
+            # Write incremental results after each successful spec so a later
+            # crash doesn't discard everything that already ran.
+            if out_path is not None and summary_rows:
+                _write_incremental(
+                    out_path,
+                    timing_rows,
+                    summary_rows,
+                    skipped,
+                    encoded,
+                    specs,
+                    bench_started_at,
+                    partial=False,
+                )
+    except Exception:
+        # On any unhandled exception: persist the specs that already completed
+        # (timing_rows / summary_rows accumulated so far) with partial=True,
+        # then re-raise so the caller still sees the failure.
+        if out_path is not None:
+            _write_incremental(
+                out_path,
                 timing_rows,
                 summary_rows,
+                skipped,
+                encoded,
+                specs,
+                bench_started_at,
+                partial=True,
             )
-        except _TOLERATED_FAILURE_TYPES as exc:
-            if not tolerate_failures:
-                raise
-            reason = f"{type(exc).__name__}: {exc}"
-            skipped.append(
-                SkippedSpec(
-                    label=spec.display_label(),
-                    db=spec.adapter.name,
-                    reason=str(exc),
-                    error_type=type(exc).__name__,
-                )
-            )
-            # Structured single-line log — matches the `[bench]` prefix
-            # of the progress line so the skip is grep-able alongside
-            # the runs that succeeded.
-            print(
-                f"[bench] SKIP adapter={spec.adapter.name} "
-                f"label={spec.display_label()} reason={reason}",
-                flush=True,
-            )
+        raise
     bench_completed_at = _dt.datetime.now(_dt.UTC)
 
-    manifest = _build_manifest(encoded, specs, bench_started_at, bench_completed_at)
+    manifest = _build_manifest(encoded, specs, bench_started_at, bench_completed_at, partial=False)
     if skipped:
         manifest["skipped_specs"] = [asdict(s) for s in skipped]
     return BenchResult(
@@ -419,6 +466,37 @@ def run_bench(
         summary=pd.DataFrame([asdict(r) for r in summary_rows]),
         manifest=manifest,
         skipped=tuple(skipped),
+        partial=False,
+    )
+
+
+def _write_incremental(
+    out_path: Path,
+    timing_rows: list[QueryTiming],
+    summary_rows: list[RunSummary],
+    skipped: list[SkippedSpec],
+    encoded: EncodedBundle,
+    specs: list[BenchSpec],
+    bench_started_at: _dt.datetime,
+    *,
+    partial: bool,
+) -> None:
+    """Flush timing/summary/manifest to ``out_path``.
+
+    Called after each completed spec (``partial=False``) and once on
+    exception (``partial=True``) so data is never fully lost to a crash.
+    """
+    out_path.mkdir(parents=True, exist_ok=True)
+    timings_df = pd.DataFrame([_qt_to_row(t) for t in timing_rows])
+    summary_df = pd.DataFrame([asdict(r) for r in summary_rows])
+    timings_df.to_parquet(out_path / "timings.parquet", index=False)
+    summary_df.to_parquet(out_path / "summary.parquet", index=False)
+    now = _dt.datetime.now(_dt.UTC)
+    manifest = _build_manifest(encoded, specs, bench_started_at, now, partial=partial)
+    if skipped:
+        manifest["skipped_specs"] = [asdict(s) for s in skipped]
+    (out_path / "bench_manifest.json").write_text(
+        json.dumps(manifest, indent=2, sort_keys=True, default=str)
     )
 
 
@@ -551,6 +629,8 @@ def _build_manifest(
     specs: list[BenchSpec],
     started_at: _dt.datetime,
     completed_at: _dt.datetime,
+    *,
+    partial: bool = False,
 ) -> dict[str, object]:
     """Build the `bench_manifest.json` payload.
 
@@ -559,9 +639,16 @@ def _build_manifest(
     fingerprint, encoder identity, per-adapter package versions
     (best-effort via importlib.metadata), and best-effort host metadata
     (no PII — just CPU/OS/python info that frames the latency numbers).
+
+    ``partial=True`` is written when the run was interrupted mid-loop.
+    It signals that ``summary.parquet`` and ``timings.parquet`` contain
+    only the specs that completed before the failure; the rest were not
+    run. Readers should inspect the row count rather than assuming all
+    specs are present.
     """
     return {
         "schema_version": BENCH_MANIFEST_SCHEMA_VERSION,
+        "partial": partial,
         "encoded_bundle_fingerprint": encoded.bundle.fingerprint(),
         "encoder_name": encoded.encoder_name,
         "encoder_dim": int(encoded.dim),
