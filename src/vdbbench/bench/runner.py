@@ -22,6 +22,7 @@ spec — everything a reviewer needs to verify what was actually run.
 
 from __future__ import annotations
 
+import contextlib
 import datetime as _dt
 import hashlib
 import json
@@ -531,7 +532,21 @@ def _run_one_spec(
     setter = getattr(spec.adapter, "set_table_name", None)
     if callable(setter):
         setter(table_name)
-    spec.adapter.setup(encoded.dim, spec.params)
+    try:
+        spec.adapter.setup(encoded.dim, spec.params)
+    except Exception:
+        # setup() failed partway through — call cleanup_partial_setup() so
+        # any on-disk state (lance directory, chroma directory) left behind
+        # by the partial setup doesn't leak into the next run or pollute
+        # teardown. teardown() is intentionally NOT called here because
+        # service adapters (pgvector, qdrant) manage their cleanup inside
+        # teardown() which assumes a completed setup; calling it after a
+        # failed setup would be undefined behaviour for those adapters.
+        cleanup = getattr(spec.adapter, "cleanup_partial_setup", None)
+        if callable(cleanup):
+            with contextlib.suppress(Exception):
+                cleanup()
+        raise
     peak_tracker.observe()  # post-setup
     try:
         ingest_stats = spec.adapter.ingest(pids, encoded.passage_vectors)

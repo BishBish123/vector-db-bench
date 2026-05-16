@@ -105,6 +105,22 @@ class ChromaAdapter:
         self._collection = None
         self._client = None
 
+    def cleanup_partial_setup(self) -> None:
+        """Remove the persist_directory created by a failed ``setup()`` call.
+
+        Called by the bench runner when ``setup()`` raises mid-way so the
+        partially-written Chroma directory doesn't pollute the next run.
+        ``teardown()`` is only called after a successful ``setup()``; this
+        method fills the gap for interrupted setups.
+        """
+        try:
+            if self._path.exists():
+                shutil.rmtree(self._path)
+        except OSError:
+            pass
+        self._collection = None
+        self._client = None
+
     # ---------- ingest ----------
 
     def ingest(self, ids: list[str], vectors: np.ndarray, batch_size: int = 1000) -> IngestStats:

@@ -125,3 +125,18 @@ class VectorStoreAdapter(Protocol):
     def memory_footprint_bytes(self) -> int:
         """Resident memory of the search server, in bytes (0 if not measurable)."""
         ...
+
+    def cleanup_partial_setup(self) -> None:
+        """Remove any on-disk state created by a ``setup()`` that was interrupted.
+
+        Called by the bench runner when ``setup()`` raises before completing
+        the full lifecycle. Embedded adapters (LanceDB, Chroma) override this
+        to ``rmtree`` their data directories so partial state doesn't leak
+        across runs. Service adapters (pgvector, Qdrant) do not override —
+        their existing ``teardown()`` paths already handle partial state, and
+        the runner only calls ``teardown()`` after a successful ``setup()``.
+
+        The default is a no-op so implementing the method is optional for
+        adapters that don't need it.
+        """
+        return  # no-op default
