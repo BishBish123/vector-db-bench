@@ -96,7 +96,13 @@ work.
 * `src/vdbbench/plot/charts.py` — every chart reads from a single
   `summary.parquet`, so `make plots` is a cheap re-run after any
   bench change. Charts produced: pareto frontier, recall bars, latency
-  bars, ingest bars, index disk bars, speedup-vs-chroma bars.
+  bars, ingest bars, index disk bars, speedup-vs-baseline bars, and
+  ``memory_recall`` (adapter peak RSS vs recall@k scatter).
+
+  The speedup baseline is `chroma` when present in the summary;
+  otherwise ``plot_all`` picks the alphabetically-first DB so runs
+  that don't include Chroma (e.g. the single-DB smoke pipeline) still
+  produce a speedup chart without raising.
 
 ## Determinism
 

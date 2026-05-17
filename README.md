@@ -120,8 +120,8 @@ The full sweep of HNSW `ef_search`, IVF `lists`/`probes`, and IVF-PQ `num_partit
 | Qdrant | Qdrant 1.17 in Docker |
 | LanceDB | embedded (no service) |
 | Chroma | embedded persistent client |
-| Harness | Python 3.11+, `pytest-benchmark` |
-| Plots | matplotlib + seaborn |
+| Harness | Python 3.11+, custom `run_bench()` runner |
+| Plots | matplotlib |
 | Reproducibility | `docker compose` with pinned versions, `make` targets, parquet outputs |
 
 ## Platform support
