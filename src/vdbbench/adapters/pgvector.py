@@ -147,9 +147,20 @@ class PgVectorAdapter:
         # register_vector path.
         conn = self._open_connection()
         try:
-            register_vector(conn)
+            # Order matters: `CREATE EXTENSION IF NOT EXISTS vector` must run
+            # BEFORE register_vector is called, otherwise psycopg has no
+            # `vector` type to bind on the connection and register_vector
+            # fails with "type 'vector' not found" against a freshly
+            # initialised database where the extension hasn't been created
+            # yet. With this ordering, register_vector still raises (and the
+            # except below still cleans up) if the extension is missing AND
+            # CREATE EXTENSION couldn't be granted — but the common
+            # "fresh-DB" path now succeeds without operator intervention.
             with conn.cursor() as cur:
                 cur.execute("CREATE EXTENSION IF NOT EXISTS vector")
+                conn.commit()
+            register_vector(conn)
+            with conn.cursor() as cur:
                 cur.execute(f'DROP TABLE IF EXISTS "{self._table}"')
                 cur.execute(
                     f'CREATE TABLE "{self._table}" (id text PRIMARY KEY, vec vector({dim}))'

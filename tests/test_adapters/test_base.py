@@ -105,17 +105,37 @@ class TestPgVectorSetupConnectionLifecycle:
 
         adapter = PgVectorAdapter(dsn="postgresql://example/none-of-this-is-real")
 
-        # Track the synthetic connection so we can assert it was closed
-        # exactly once and never promoted onto self._conn.
+        # Track the synthetic connection. CREATE EXTENSION now runs *before*
+        # register_vector (so a fresh DB without the extension still
+        # initialises), so cursor() is allowed to run for that single
+        # statement; it must NOT run again after register_vector raises.
+        class _FakeCursor:
+            def __init__(self, parent: "_FakeConn") -> None:
+                self._parent = parent
+
+            def __enter__(self) -> "_FakeCursor":
+                return self
+
+            def __exit__(self, *_: object) -> None:
+                return None
+
+            def execute(self, sql: str) -> None:
+                self._parent.executed.append(sql)
+
         class _FakeConn:
             def __init__(self) -> None:
                 self.closed = 0
+                self.executed: list[str] = []
+                self.committed = 0
 
             def close(self) -> None:
                 self.closed += 1
 
-            def cursor(self) -> object:  # pragma: no cover - never reached
-                raise AssertionError("cursor() should not run after register_vector raises")
+            def cursor(self) -> _FakeCursor:
+                return _FakeCursor(self)
+
+            def commit(self) -> None:
+                self.committed += 1
 
         fake = _FakeConn()
         monkeypatch.setattr(PgVectorAdapter, "_open_connection", lambda self: fake)
@@ -133,12 +153,68 @@ class TestPgVectorSetupConnectionLifecycle:
         with pytest.raises(RuntimeError, match="register_vector failure"):
             adapter.setup(dim=4, params={})
 
+        # Exactly the CREATE EXTENSION statement ran (no DROP / CREATE
+        # TABLE). register_vector blew up before the DDL block.
+        assert fake.executed == ["CREATE EXTENSION IF NOT EXISTS vector"]
         # Connection got closed and was never promoted.
         assert fake.closed == 1
         assert adapter._conn is None
         # And the adapter is still un-initialised so a follow-up ingest
         # call raises the un-setup error rather than a phantom-state one.
         assert adapter._dim is None
+
+    def test_setup_runs_create_extension_before_register_vector(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """CREATE EXTENSION must run BEFORE register_vector — otherwise a
+        fresh pgvector container without the extension installed raises
+        "type 'vector' not found" on register_vector and the adapter is
+        unusable until an operator manually runs CREATE EXTENSION.
+        """
+        pytest.importorskip("pgvector")
+        from vdbbench.adapters.pgvector import PgVectorAdapter  # noqa: PLC0415
+
+        adapter = PgVectorAdapter(dsn="postgresql://example/none-of-this-is-real")
+        events: list[str] = []
+
+        class _Cur:
+            def __enter__(self) -> "_Cur":
+                return self
+
+            def __exit__(self, *_: object) -> None:
+                return None
+
+            def execute(self, sql: str) -> None:
+                # Only the first execute call is the extension; subsequent
+                # ones are DROP/CREATE TABLE which we don't need to track
+                # individually for the ordering assertion.
+                if "CREATE EXTENSION" in sql:
+                    events.append("create_extension")
+
+        class _Conn:
+            def cursor(self) -> _Cur:
+                return _Cur()
+
+            def commit(self) -> None:
+                pass
+
+            def close(self) -> None:
+                pass
+
+        monkeypatch.setattr(PgVectorAdapter, "_open_connection", lambda self: _Conn())
+
+        import pgvector.psycopg as pgv_psycopg  # noqa: PLC0415
+
+        def fake_register(_conn: object) -> None:
+            events.append("register_vector")
+
+        monkeypatch.setattr(pgv_psycopg, "register_vector", fake_register)
+
+        adapter.setup(dim=4, params={})
+
+        assert events.index("create_extension") < events.index("register_vector"), (
+            f"register_vector ran before CREATE EXTENSION; events={events}"
+        )
 
 
 class TestPgVectorTableNameValidation:
