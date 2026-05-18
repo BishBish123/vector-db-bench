@@ -441,21 +441,32 @@ def run_bench(
                     bench_started_at,
                     partial=False,
                 )
-    except Exception:
-        # On any unhandled exception: persist the specs that already completed
-        # (timing_rows / summary_rows accumulated so far) with partial=True,
-        # then re-raise so the caller still sees the failure.
+    except BaseException:
+        # On any unhandled exception OR Ctrl-C: persist the specs that already
+        # completed (timing_rows / summary_rows accumulated so far) with
+        # partial=True, then re-raise so the caller still sees the failure.
+        # We deliberately catch BaseException — not Exception — so that
+        # KeyboardInterrupt and SystemExit are still treated as bench
+        # interruptions: a 30-minute run cancelled with Ctrl-C should leave
+        # behind a partial manifest of the specs that already succeeded,
+        # not silently throw all of that work away. The bare `raise` below
+        # re-propagates the original exception (BaseException or otherwise)
+        # so the interpreter still terminates / KeyboardInterrupt still
+        # tears down the CLI as before.
         if out_path is not None:
-            _write_incremental(
-                out_path,
-                timing_rows,
-                summary_rows,
-                skipped,
-                encoded,
-                specs,
-                bench_started_at,
-                partial=True,
-            )
+            with contextlib.suppress(Exception):
+                # Crash inside the manifest writer must not mask the
+                # original interruption — swallow only its exceptions.
+                _write_incremental(
+                    out_path,
+                    timing_rows,
+                    summary_rows,
+                    skipped,
+                    encoded,
+                    specs,
+                    bench_started_at,
+                    partial=True,
+                )
         raise
     bench_completed_at = _dt.datetime.now(_dt.UTC)
 

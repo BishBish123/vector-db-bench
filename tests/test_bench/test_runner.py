@@ -542,6 +542,40 @@ class TestPartialBench:
         manifest = _json.loads((out / "bench_manifest.json").read_text())
         assert manifest["partial"] is False
 
+    def test_keyboard_interrupt_writes_partial_manifest(self, tmp_path: Path) -> None:
+        """Ctrl-C mid-run must still flush the partial manifest. The runner
+        previously caught only ``Exception`` so KeyboardInterrupt raced
+        past the cleanup branch and threw away every spec that had
+        already completed; switching to ``BaseException`` keeps the
+        partial-manifest contract on cancel.
+        """
+        import json as _json  # noqa: PLC0415
+
+        encoded = _toy_encoded()
+
+        class CtrlCAdapter(_MemAdapter):
+            name = "ctrlc"
+
+            def ingest(
+                self, ids: list[str], vectors: np.ndarray, batch_size: int = 1024
+            ) -> IngestStats:
+                raise KeyboardInterrupt
+
+        good_spec = BenchSpec(adapter=_MemAdapter(), params={"v": "good"}, k=2)
+        cancel_spec = BenchSpec(adapter=CtrlCAdapter(), params={"v": "cancel"}, k=2)
+        out = tmp_path / "bench-cancel"
+
+        with pytest.raises(KeyboardInterrupt):
+            run_bench(encoded, [good_spec, cancel_spec], out=out)
+
+        # The good spec's results must have been flushed before Ctrl-C
+        # propagated up the stack.
+        summary = pd.read_parquet(out / "summary.parquet")
+        assert len(summary) == 1
+        assert summary.iloc[0]["db"] == "mem"
+        manifest = _json.loads((out / "bench_manifest.json").read_text())
+        assert manifest["partial"] is True
+
 
 class TestBenchSpecProfile:
     def test_warm_is_default(self) -> None:

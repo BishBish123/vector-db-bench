@@ -110,10 +110,10 @@ class TestPgVectorSetupConnectionLifecycle:
         # initialises), so cursor() is allowed to run for that single
         # statement; it must NOT run again after register_vector raises.
         class _FakeCursor:
-            def __init__(self, parent: "_FakeConn") -> None:
+            def __init__(self, parent: _FakeConn) -> None:
                 self._parent = parent
 
-            def __enter__(self) -> "_FakeCursor":
+            def __enter__(self) -> _FakeCursor:
                 return self
 
             def __exit__(self, *_: object) -> None:
@@ -178,7 +178,7 @@ class TestPgVectorSetupConnectionLifecycle:
         events: list[str] = []
 
         class _Cur:
-            def __enter__(self) -> "_Cur":
+            def __enter__(self) -> _Cur:
                 return self
 
             def __exit__(self, *_: object) -> None:
