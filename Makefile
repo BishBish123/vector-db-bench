@@ -131,6 +131,12 @@ up-pull: ## Pre-pull pgvector + qdrant images so `up --wait` doesn't time out on
 
 .PHONY: up-wait
 up-wait: ## Start containers and wait for healthy (assumes images already pulled)
+	@# Sweep stale "Created" containers from prior failed runs first —
+	@# otherwise `up -d --wait` errors out with "container is already in
+	@# use" and the operator has to manually `docker compose down` before
+	@# they can iterate. `|| true` because a clean host has nothing to
+	@# remove and `down` reports a non-zero on missing project state.
+	@docker compose down --remove-orphans 2>/dev/null || true
 	@docker compose up -d --wait || { \
 		echo ""; \
 		echo "[make up] docker compose failed."; \
@@ -139,6 +145,10 @@ up-wait: ## Start containers and wait for healthy (assumes images already pulled
 		echo "  Current published ports: pgvector=$(PGVECTOR_PORT), qdrant=$(QDRANT_PORT)."; \
 		exit 1; \
 	}
+
+.PHONY: clean-containers
+clean-containers: ## Force-remove pgvector + qdrant containers and their volumes (use when 'make up' is wedged)
+	docker compose down -v --remove-orphans
 
 .PHONY: up
 up: up-pull up-wait ## Bring up pgvector + qdrant containers (pulls images first, then waits for healthy)
