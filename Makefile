@@ -15,8 +15,10 @@ EMBED_MODEL ?= BAAI/bge-small-en-v1.5
 # `make up PGVECTOR_PORT=5444 QDRANT_PORT=6343` is the documented escape hatch.
 PGVECTOR_PORT ?= 5433
 QDRANT_PORT ?= 6333
+QDRANT_GRPC_PORT ?= 6334
 export PGVECTOR_PORT
 export QDRANT_PORT
+export QDRANT_GRPC_PORT
 
 # Derive the bench-side DSN / URL from the same vars so `make bench-demo
 # PGVECTOR_PORT=5444` actually reaches the rebound container instead of
